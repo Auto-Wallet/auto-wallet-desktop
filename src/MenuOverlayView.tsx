@@ -5,8 +5,7 @@ import {
   type MenuOverlayAction,
   type MenuOverlayPayload,
 } from "./lib/menuOverlay";
-import { shortAddress } from "./lib/format";
-import { Avatar, CopyButton } from "./lib/ui";
+import { BrowserAccountMenu } from "./pages/BrowserAccountMenu";
 import { Icon } from "./lib/icons";
 import { ChainIcon } from "./lib/ChainIcon";
 import { filterChains } from "./lib/chainSearch";
@@ -76,11 +75,13 @@ export default function MenuOverlayView() {
     <div className="menu-overlay-root" onMouseDown={() => post({ type: "dismiss" })}>
       <div
         data-origin="top-right"
-        className={`chain-menu menu-overlay-menu t-dropdown ${openCls}${menu.kind === "account" ? " acct-pop scroll" : " chain-picker"}`}
+        className={`chain-menu menu-overlay-menu t-dropdown ${openCls}${menu.kind === "account" ? " acct-pop" : " chain-picker"}`}
         style={{
           top: menu.anchor.top,
           right: menu.anchor.right,
-          maxHeight: menu.kind === "chain" ? `calc(100vh - ${menu.anchor.top + 12}px)` : undefined,
+          maxHeight: menu.kind === "chain"
+            ? `calc(100vh - ${menu.anchor.top + 12}px)`
+            : `min(380px, calc(100vh - ${menu.anchor.top + 12}px))`,
         }}
         onMouseDown={(e) => e.stopPropagation()}
       >
@@ -141,46 +142,20 @@ function DappDialog({ dialog }: { dialog: Extract<MenuOverlayPayload, { kind: "d
   );
 }
 
-// Markup mirrors AcctChip's in-shell dropdown (BrowserView.tsx) so both render
-// identically from the same CSS.
 function AcctMenu({ menu }: { menu: Extract<MenuOverlayPayload, { kind: "account" }> }) {
-  const isActive = (addr: string) => addr.toLowerCase() === menu.activeAddress.toLowerCase();
+  const [query, setQuery] = useState("");
   return (
-    <>
-      {menu.accounts.map((a) => (
-        <div
-          key={a.address}
-          role="button"
-          tabIndex={0}
-          className={`acct-opt${isActive(a.address) ? " on" : ""}`}
-          onClick={() => post({ type: "select-account", address: a.address })}
-          onKeyDown={(e) => {
-            if (e.key !== "Enter" && e.key !== " ") return;
-            e.preventDefault();
-            post({ type: "select-account", address: a.address });
-          }}
-        >
-          <Avatar address={a.address} size={28} />
-          <span className="meta">
-            <span className="l">{a.label}</span>
-            <span className="a">{shortAddress(a.address, 8, 6)}</span>
-          </span>
-          <CopyButton
-            className="acct-copy"
-            title={menu.copyTitle}
-            size={14}
-            value={a.address}
-            onCopied={() => post({ type: "copy-result", success: true })}
-            onCopyFailed={() => post({ type: "copy-result", success: false })}
-          />
-          {isActive(a.address) && (
-            <span className="check">
-              <Icon name="check" size={15} />
-            </span>
-          )}
-        </div>
-      ))}
-    </>
+    <BrowserAccountMenu
+      accounts={menu.accounts}
+      activeAddress={menu.activeAddress}
+      query={query}
+      onQueryChange={setQuery}
+      onSelect={(address) => post({ type: "select-account", address })}
+      onDismiss={() => post({ type: "dismiss" })}
+      copyTitle={menu.copyTitle}
+      onCopied={() => post({ type: "copy-result", success: true })}
+      onCopyFailed={() => post({ type: "copy-result", success: false })}
+    />
   );
 }
 

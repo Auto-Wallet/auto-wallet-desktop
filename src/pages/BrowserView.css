@@ -118,10 +118,19 @@
 }
 
 /* account dropdown (reuses .chain-menu container) */
-.acct-pop {
+.chain-menu.acct-pop {
   width: 272px;
-  max-height: 320px;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  max-height: min(380px, calc(100vh - 76px));
+  overflow: hidden;
+}
+.acct-pop .chain-search {
+  flex-shrink: 0;
+}
+.acct-list {
+  min-height: 0;
+  overflow-y: auto;
 }
 .acct-opt {
   display: flex;

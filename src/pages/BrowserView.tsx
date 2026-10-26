@@ -1,5 +1,6 @@
 import "./BrowserView.css";
 import { BrowserUrlInput } from "./BrowserUrlInput";
+import { BrowserAccountMenu } from "./BrowserAccountMenu";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useChains, type Chain } from "../lib/chains";
@@ -8,7 +9,7 @@ import { setActive, useAccounts, useActiveAccount } from "../lib/accounts";
 import { setActiveChain, useActiveChain } from "../lib/activeChain";
 import { useT } from "../lib/i18n";
 import { Icon } from "../lib/icons";
-import { Avatar, CopyButton, DappIcon } from "../lib/ui";
+import { Avatar, DappIcon } from "../lib/ui";
 import { toast } from "../lib/toast";
 import { ChainIcon } from "../lib/ChainIcon";
 import { filterChains } from "../lib/chainSearch";
@@ -321,9 +322,9 @@ function AcctChip() {
   const active = useActiveAccount();
   const native = isTauri();
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const menu = useDropdown(open);
   const [anchor, setAnchor] = useState<MenuAnchor | null>(null);
-  const isActive = (addr: string) => addr.toLowerCase() === active.address.toLowerCase();
   const payload = useMemo<MenuOverlayPayload | null>(
     () =>
       anchor
@@ -350,7 +351,10 @@ function AcctChip() {
       <button
         className="acct-chip"
         onClick={(e) => {
-          if (!native) return setOpen((o) => !o);
+          if (!native) {
+            setQuery("");
+            return setOpen((o) => !o);
+          }
           const next = menuAnchorFor(e.currentTarget);
           setAnchor((a) => (a ? null : next));
         }}
@@ -364,45 +368,22 @@ function AcctChip() {
         <>
           <div style={{ position: "fixed", inset: 0, zIndex: 30 }} onClick={() => setOpen(false)} />
           <div
-            className={`chain-menu acct-pop scroll t-dropdown ${menu.cls}`}
+            className={`chain-menu acct-pop t-dropdown ${menu.cls}`}
             data-origin="top-right"
           >
-            {accounts.map((a) => (
-              <div
-                key={a.address}
-                role="button"
-                tabIndex={0}
-                className={`acct-opt${isActive(a.address) ? " on" : ""}`}
-                onClick={() => {
-                  setActive(a.address);
-                  setOpen(false);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key !== "Enter" && e.key !== " ") return;
-                  e.preventDefault();
-                  setActive(a.address);
-                  setOpen(false);
-                }}
-              >
-                <Avatar address={a.address} size={28} />
-                <span className="meta">
-                  <span className="l">{a.label}</span>
-                  <span className="a">{shortAddress(a.address, 8, 6)}</span>
-                </span>
-                <CopyButton
-                  className="acct-copy"
-                  title={t("wallet.copy")}
-                  size={14}
-                  value={a.address}
-                  onCopied={() => toast(t("common.copied"))}
-                />
-                {isActive(a.address) && (
-                  <span className="check">
-                    <Icon name="check" size={15} />
-                  </span>
-                )}
-              </div>
-            ))}
+            <BrowserAccountMenu
+              accounts={accounts}
+              activeAddress={active.address}
+              query={query}
+              onQueryChange={setQuery}
+              onSelect={(address) => {
+                setActive(address);
+                setOpen(false);
+              }}
+              onDismiss={() => setOpen(false)}
+              copyTitle={t("wallet.copy")}
+              onCopied={() => toast(t("common.copied"))}
+            />
           </div>
         </>
       )}
