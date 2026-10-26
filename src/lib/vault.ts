@@ -123,10 +123,10 @@ function demoStatus(): VaultState {
     active: demoActive,
   };
 }
-function demoAddWallet(kind: VaultKind): WalletRef {
+function demoAddWallet(kind: VaultKind, label = `Wallet ${demoWallets.length + 1}`): WalletRef {
   const id = `demo-${++demoSeq}`;
   const address = nextDemoAddr();
-  demoWallets.push({ id, label: `Wallet ${demoWallets.length + 1}`, kind, accounts: [address] });
+  demoWallets.push({ id, label, kind, accounts: [address] });
   if (kind !== "ledger") demoHasPassword = true;
   demoLocked = false;
   demoActive = address;
@@ -179,13 +179,16 @@ export async function importVault(password: string | undefined, mnemonic: string
 export async function importPrivateKey(
   password: string | undefined,
   privateKey: string,
+  name: string,
 ): Promise<WalletRef> {
+  const label = name.trim();
+  if (!label) throw new Error("wallet name cannot be empty");
   if (!isTauri()) {
-    const ref = demoAddWallet("privkey");
+    const ref = demoAddWallet("privkey", label);
     set(demoStatus());
     return ref;
   }
-  const ref = await invoke<WalletRef>("import_private_key", { password, privateKey: privateKey.trim() });
+  const ref = await invoke<WalletRef>("import_private_key", { password, privateKey: privateKey.trim(), label });
   await refreshVaultStatus();
   return ref;
 }

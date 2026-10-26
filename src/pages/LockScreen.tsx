@@ -230,6 +230,7 @@ function ImportForm({ onBack, onDone }: { onBack: () => void; onDone: () => void
   const segRef = useSegPill<HTMLDivElement>(tab);
   const [phrase, setPhrase] = useState("");
   const [privkey, setPrivkey] = useState("");
+  const [name, setName] = useState("");
   const [pw, setPw] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -244,6 +245,7 @@ function ImportForm({ onBack, onDone }: { onBack: () => void; onDone: () => void
     } else {
       const body = privkey.trim().replace(/^0x/i, "");
       if (!/^[0-9a-fA-F]{64}$/.test(body)) return setError(t("lock.errPrivkey"));
+      if (!name.trim()) return setError(t("wallet.nameRequired"));
     }
     if (pw.length < 8) {
       pwShake.shake();
@@ -257,7 +259,7 @@ function ImportForm({ onBack, onDone }: { onBack: () => void; onDone: () => void
     setError(null);
     try {
       if (tab === "phrase") await importVault(pw, phrase);
-      else await importPrivateKey(pw, privkey);
+      else await importPrivateKey(pw, privkey, name);
       onDone();
     } catch (e) {
       setError(errText(e));
@@ -279,6 +281,21 @@ function ImportForm({ onBack, onDone }: { onBack: () => void; onDone: () => void
         </button>
       </div>
 
+      {tab === "privkey" && (
+        <div className="field">
+          <label className="field-label" htmlFor="import-wallet-name">{t("wallet.walletName")}</label>
+          <input
+            id="import-wallet-name"
+            className="input"
+            value={name}
+            onChange={(e) => { setName(e.target.value); setError(null); }}
+            placeholder={t("wallet.walletName")}
+            autoComplete="off"
+            disabled={busy}
+            required
+          />
+        </div>
+      )}
       {tab === "phrase" ? (
         <div className="field">
           <label className="field-label">{t("lock.recoveryPhrase")}</label>

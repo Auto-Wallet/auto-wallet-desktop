@@ -3248,6 +3248,7 @@ function ImportWalletForm({
   const segRef = useSegPill<HTMLDivElement>(tab);
   const [phrase, setPhrase] = useState("");
   const [privkey, setPrivkey] = useState("");
+  const [name, setName] = useState("");
   const [pw, setPw] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -3261,6 +3262,7 @@ function ImportWalletForm({
       const body = privkey.trim().replace(/^0x/i, "");
       if (!/^[0-9a-fA-F]{64}$/.test(body))
         return setError(t("lock.errPrivkey"));
+      if (!name.trim()) return setError(t("wallet.nameRequired"));
     }
     if (needsPassword) {
       if (pw.length < 8) return setError(t("lock.errShort"));
@@ -3272,7 +3274,7 @@ function ImportWalletForm({
       const ref =
         tab === "phrase"
           ? await importVault(needsPassword ? pw : undefined, phrase)
-          : await importPrivateKey(needsPassword ? pw : undefined, privkey);
+          : await importPrivateKey(needsPassword ? pw : undefined, privkey, name);
       setActive(ref.address); // make the imported wallet active everywhere
       toast(t("wallet.added"));
       onDone();
@@ -3299,6 +3301,21 @@ function ImportWalletForm({
           {t("lock.importTab.privkey")}
         </button>
       </div>
+      {tab === "privkey" && (
+        <div className="field">
+          <label className="field-label" htmlFor="import-wallet-name">{t("wallet.walletName")}</label>
+          <input
+            id="import-wallet-name"
+            className="input"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder={t("wallet.walletName")}
+            autoComplete="off"
+            disabled={busy}
+            required
+          />
+        </div>
+      )}
       {tab === "phrase" ? (
         <textarea
           className="textarea mono"

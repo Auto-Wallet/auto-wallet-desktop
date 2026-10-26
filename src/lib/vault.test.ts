@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
-import { enableTouchId, getTouchIdStatus, unlockVaultWithTouchId } from "./vault";
+import { enableTouchId, getTouchIdStatus, importPrivateKey, unlockVaultWithTouchId } from "./vault";
 
 Object.defineProperty(globalThis, "window", {
   value: globalThis,
@@ -8,6 +8,38 @@ Object.defineProperty(globalThis, "window", {
 });
 
 afterEach(() => clearMocks());
+
+describe("Private key import", () => {
+  test("imports the key and trimmed wallet name in one command", async () => {
+    const calls: Array<{ command: string; args: unknown }> = [];
+    mockIPC((command, args) => {
+      calls.push({ command, args });
+      if (command === "import_private_key") return { id: "imported", address: "0x1234" };
+      if (command === "vault_status") return {
+        exists: true, unlocked: true, has_password: true,
+        wallets: [{ id: "imported", label: "Trading", kind: "privkey", accounts: ["0x1234"] }],
+        active: "0x1234",
+      };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+
+    expect(await importPrivateKey(undefined, "  test-key  ", "  Trading  ")).toEqual({
+      id: "imported", address: "0x1234",
+    });
+    expect(calls).toEqual([
+      { command: "import_private_key", args: { password: undefined, privateKey: "test-key", label: "Trading" } },
+      { command: "vault_status", args: {} },
+    ]);
+  });
+
+  test("rejects a blank name before importing a wallet", async () => {
+    const calls: string[] = [];
+    mockIPC((command) => { calls.push(command); });
+
+    await expect(importPrivateKey(undefined, "test-key", " \t ")).rejects.toThrow("wallet name cannot be empty");
+    expect(calls).toEqual([]);
+  });
+});
 
 describe("Touch ID vault bridge", () => {
   test("reads Touch ID state from the native vault command", async () => {

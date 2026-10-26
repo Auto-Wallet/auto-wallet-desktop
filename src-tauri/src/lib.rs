@@ -7683,7 +7683,12 @@ fn import_private_key<R: Runtime>(
     app: AppHandle<R>,
     password: Option<String>,
     private_key: String,
+    label: String,
 ) -> Result<WalletRef, String> {
+    let label = label.trim().to_string();
+    if label.is_empty() {
+        return Err("wallet name cannot be empty".to_string());
+    }
     // Validate + canonicalize to 0x-lowercase-hex before sealing, so unlock
     // re-derives the same address deterministically.
     let key = vault::parse_private_key(&private_key)?;
@@ -7691,7 +7696,6 @@ fn import_private_key<R: Runtime>(
     let address = address_from_verifying_key(key.verifying_key());
     let (pw, store_pw) = resolve_app_password(&app, password)?;
     let id = vault::new_wallet_id();
-    let label = next_wallet_label(&app)?;
     let metas = vec![vault::AccountMeta {
         index: 0,
         address: address.clone(),
