@@ -1,16 +1,16 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./LockScreen.css";
 import logoMark from "../assets/auto-desktop-mark.png";
 import { useT } from "../lib/i18n";
 import { Icon } from "../lib/icons";
 import { LedgerList, useLedgerScan } from "../lib/LedgerPicker";
 import { WalletNameField } from "../lib/WalletNameField";
+import { prepareUnlock } from "../lib/preferredUnlock";
 import { useSegPill, useShake } from "../lib/transitions";
 import {
   createVault,
   importPrivateKey,
   importVault,
-  getTouchIdStatus,
   resetVault,
   unlockVault,
   unlockVaultWithTouchId,
@@ -436,24 +436,36 @@ function BackupScreen({ mnemonic, onDone }: { mnemonic: string; onDone: () => vo
   );
 }
 
-function UnlockForm({ onDone, onForgot }: { onDone: () => void; onForgot: () => void }) {
+export function UnlockForm({ onDone, onForgot }: { onDone: () => void; onForgot: () => void }) {
   const { t } = useT();
   const [pw, setPw] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"password" | "touchId" | null>(null);
   const [touchIdStatus, setTouchIdStatus] = useState<TouchIdStatus | null>(null);
+  const [checking, setChecking] = useState(true);
+  const [method, setMethod] = useState<"password" | "touchId">("touchId");
+  const authenticating = useRef(false);
   // Shake on every rejection, not just the first — the message is identical
   // each time, so React state alone would never re-trigger it.
   const { ref: pwShakeRef, shake } = useShake<HTMLDivElement>();
 
   useEffect(() => {
     let active = true;
-    void getTouchIdStatus()
-      .then((status) => {
-        if (active) setTouchIdStatus(status);
-      })
+    void prepareUnlock({
+      isActive: () => active,
+      onStatus: (status) => {
+        setTouchIdStatus(status);
+        setMethod(status.available && status.enabled ? "touchId" : "password");
+        setChecking(false);
+      },
+      onTouchId: submitTouchId,
+    })
       .catch((reason) => {
-        if (active) setError(errText(reason));
+        if (active) {
+          setError(errText(reason));
+          setMethod("password");
+          setChecking(false);
+        }
       });
     return () => {
       active = false;
@@ -461,6 +473,8 @@ function UnlockForm({ onDone, onForgot }: { onDone: () => void; onForgot: () => 
   }, []);
 
   async function submit() {
+    if (authenticating.current) return;
+    authenticating.current = true;
     setBusy("password");
     setError(null);
     try {
@@ -470,10 +484,14 @@ function UnlockForm({ onDone, onForgot }: { onDone: () => void; onForgot: () => 
       setError(errText(e));
       setBusy(null);
       shake();
+    } finally {
+      authenticating.current = false;
     }
   }
 
   async function submitTouchId() {
+    if (authenticating.current) return;
+    authenticating.current = true;
     setBusy("touchId");
     setError(null);
     try {
@@ -482,37 +500,62 @@ function UnlockForm({ onDone, onForgot }: { onDone: () => void; onForgot: () => 
     } catch (reason) {
       setError(errText(reason));
       setBusy(null);
+    } finally {
+      authenticating.current = false;
     }
+  }
+
+  if (checking) {
+    return (
+      <div className="lock-body" aria-live="polite">
+        <button className="btn btn-aurora btn-lg btn-block" disabled>{t("lock.checkingUnlock")}</button>
+      </div>
+    );
   }
 
   return (
     <div className="lock-body">
-      <div className="field">
-        <label className="field-label">{t("lock.password")}</label>
-        <PasswordField value={pw} onChange={(v) => { setPw(v); setError(null); }} placeholder={t("lock.password")} autoFocus onEnter={submit} shakeRef={pwShakeRef} />
-      </div>
+      {method === "password" && (
+        <div className="field">
+          <label className="field-label">{t("lock.password")}</label>
+          <PasswordField value={pw} onChange={(v) => { setPw(v); setError(null); }} placeholder={t("lock.password")} autoFocus onEnter={submit} shakeRef={pwShakeRef} />
+        </div>
+      )}
       {error && (
         <div className="lock-err">
           <Icon name="alert" size={16} /> {error}
         </div>
       )}
-      <button className="btn btn-aurora btn-lg btn-block" disabled={busy !== null} onClick={submit}>
-        <Icon name="unlock" size={18} /> {busy === "password" ? "…" : t("lock.unlock")}
-      </button>
-      {touchIdStatus !== null && touchIdStatus.available && touchIdStatus.enabled && (
+      {method === "touchId" ? (
         <>
-          <div className="lock-or"><span>{t("lock.or")}</span></div>
           <button
-            className="btn btn-touch-id btn-lg btn-block"
+            className="btn btn-aurora btn-lg btn-block"
+            autoFocus
             disabled={busy !== null}
             onClick={submitTouchId}
           >
-            <span className="touch-id-icon"><Icon name="fingerprint" size={21} /></span>
+            <Icon name="fingerprint" size={25} />
             {busy === "touchId" ? t("lock.touchIdUnlocking") : t("lock.unlockWithTouchId")}
           </button>
+          <button className="lock-link" disabled={busy !== null} onClick={() => {
+            setError(null);
+            setMethod("password");
+          }}>{t("lock.usePassword")}</button>
+        </>
+      ) : (
+        <>
+          <button className="btn btn-aurora btn-lg btn-block" disabled={busy !== null} onClick={submit}>
+            <Icon name="unlock" size={18} /> {busy === "password" ? "…" : t("lock.unlock")}
+          </button>
+          {touchIdStatus !== null && touchIdStatus.available && touchIdStatus.enabled && (
+            <button className="lock-link" disabled={busy !== null} onClick={() => {
+              setMethod("touchId");
+              void submitTouchId();
+            }}>{t("lock.unlockWithTouchId")}</button>
+          )}
         </>
       )}
-      <button className="lock-link" onClick={onForgot}>
+      <button className="lock-link" disabled={busy !== null} onClick={onForgot}>
         {t("lock.forgot")}
       </button>
     </div>
