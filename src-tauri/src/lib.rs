@@ -33,6 +33,7 @@ mod smoke;
 #[cfg(all(target_os = "macos", debug_assertions))]
 mod startup_smoke;
 mod vault;
+mod password_change;
 // EIP-1559 transaction encoding + signing (pure). eth_sendTransaction fills the
 // fields from the node in lib.rs, then builds + signs here.
 mod eth_tx;
@@ -7372,6 +7373,17 @@ fn remove_chain<R: Runtime>(app: AppHandle<R>, id: String) -> Result<Vec<ChainCf
 const WALLETS_DIR: &str = "wallets";
 const LEGACY_KEYSTORE_FILE: &str = "vault.json";
 
+// Serialize vault file operations, including password rotation and recovery.
+// Always acquire this before the in-memory store lock.
+fn vault_io_lock() -> &'static Mutex<()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    &LOCK
+}
+
+fn recover_wallet_password<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    password_change::recover(&wallets_dir(app)?, &touch_id_marker_file(app)?)
+}
+
 fn wallets_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     Ok(app
         .path()
@@ -7450,6 +7462,7 @@ fn migrate_legacy_keystore<R: Runtime>(app: &AppHandle<R>) -> Result<(), String>
 /// single vault first). The shell renders the wallet switcher from this.
 fn read_all_keystores<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<vault::Keystore>, String> {
     migrate_legacy_keystore(app)?;
+    recover_wallet_password(app)?;
     let dir = wallets_dir(app)?;
     let mut out: Vec<vault::Keystore> = Vec::new();
     match std::fs::read_dir(&dir) {
@@ -7595,6 +7608,7 @@ struct ExportedSecret {
 /// account. The shell renders the switcher + gates the lock screen from this.
 #[tauri::command]
 fn vault_status<R: Runtime>(app: AppHandle<R>) -> Result<VaultStatus, String> {
+    let _io = vault_io_lock().lock().unwrap();
     let disk = read_all_keystores(&app)?;
     let has_password = disk.iter().any(|k| k.kind == "hd" || k.kind == "privkey");
     let guard = store_state().lock().unwrap();
@@ -7629,6 +7643,7 @@ fn create_vault<R: Runtime>(
     app: AppHandle<R>,
     password: Option<String>,
 ) -> Result<NewVault, String> {
+    let _io = vault_io_lock().lock().unwrap();
     let (pw, store_pw) = resolve_app_password(&app, password)?;
     let mnemonic = vault::generate_mnemonic()?;
     let id = vault::new_wallet_id();
@@ -7662,6 +7677,7 @@ fn import_vault<R: Runtime>(
     mnemonic: String,
     label: Option<String>,
 ) -> Result<WalletRef, String> {
+    let _io = vault_io_lock().lock().unwrap();
     vault::validate_mnemonic(&mnemonic)?;
     let (pw, store_pw) = resolve_app_password(&app, password)?;
     let id = vault::new_wallet_id();
@@ -7692,6 +7708,7 @@ fn import_private_key<R: Runtime>(
     private_key: String,
     label: Option<String>,
 ) -> Result<WalletRef, String> {
+    let _io = vault_io_lock().lock().unwrap();
     let label = next_wallet_label(&app, label)?;
     // Validate + canonicalize to 0x-lowercase-hex before sealing, so unlock
     // re-derives the same address deterministically.
@@ -7733,6 +7750,8 @@ fn export_wallet_secret<R: Runtime>(
     wallet_id: String,
     password: String,
 ) -> Result<ExportedSecret, String> {
+    let _io = vault_io_lock().lock().unwrap();
+    recover_wallet_password(&app)?;
     let path = wallet_file(&app, &wallet_id)?;
     let ks = read_keystore(&path)?.ok_or("wallet not found")?;
     match ks.kind.as_str() {
@@ -7750,6 +7769,7 @@ fn export_wallet_secret<R: Runtime>(
 /// ANY software wallet exists, do nothing: the app stays locked until the user
 /// enters the password (which also loads the Ledger wallets).
 fn boot_load_ledger_only<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let _io = vault_io_lock().lock().unwrap();
     let disk = read_all_keystores(app)?;
     let has_software = disk.iter().any(|k| k.kind == "hd" || k.kind == "privkey");
     if has_software || disk.is_empty() {
@@ -7780,7 +7800,40 @@ fn boot_load_ledger_only<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
 /// address.
 #[tauri::command]
 fn unlock_vault<R: Runtime>(app: AppHandle<R>, password: String) -> Result<String, String> {
+    let _io = vault_io_lock().lock().unwrap();
     unlock_vault_with_password(&app, Zeroizing::new(password))
+}
+
+/// Re-encrypt all software wallets under one new password. The transaction
+/// journal makes the entire change recoverable after process or write failure.
+#[tauri::command]
+async fn change_password<R: Runtime>(
+    app: AppHandle<R>,
+    current_password: String,
+    new_password: String,
+) -> Result<password_change::ChangePasswordResult, String> {
+    let current = Zeroizing::new(current_password);
+    let new = Zeroizing::new(new_password);
+    tauri::async_runtime::spawn_blocking(move || {
+        let _io = vault_io_lock().lock().unwrap();
+        let wallets = read_all_keystores(&app)?;
+        let mut guard = store_state().lock().unwrap();
+        let store = guard.as_mut().ok_or("unlock the wallet before changing the password")?;
+        if store.password.is_none() {
+            return Err("this wallet does not use an app password".into());
+        }
+        let result = password_change::change(
+            &wallets_dir(&app)?,
+            &touch_id_marker_file(&app)?,
+            &wallets,
+            &current,
+            &new,
+            touch_id::save_password,
+        )?;
+        store.password = Some(new);
+        note_activity();
+        Ok(result)
+    }).await.map_err(|error| format!("changing wallet password: {error}"))?
 }
 
 fn unlock_vault_with_password<R: Runtime>(
@@ -7838,6 +7891,8 @@ fn touch_id_marker_file<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, Strin
 
 #[tauri::command]
 fn touch_id_status<R: Runtime>(app: AppHandle<R>) -> Result<touch_id::TouchIdStatus, String> {
+    let _io = vault_io_lock().lock().unwrap();
+    recover_wallet_password(&app)?;
     let enabled = touch_id::read_enabled_marker(&touch_id_marker_file(&app)?)?;
     Ok(touch_id::TouchIdStatus {
         available: touch_id::available(),
@@ -7847,39 +7902,40 @@ fn touch_id_status<R: Runtime>(app: AppHandle<R>) -> Result<touch_id::TouchIdSta
 
 #[tauri::command]
 async fn enable_touch_id<R: Runtime>(app: AppHandle<R>, reason: String) -> Result<(), String> {
-    let password = {
-        let guard = store_state().lock().unwrap();
-        let store = guard
-            .as_ref()
-            .ok_or("unlock the wallet before enabling Touch ID")?;
-        let password = store
-            .password
-            .as_ref()
-            .ok_or("this wallet does not use an app password")?;
-        Zeroizing::new(password.to_string())
-    };
-
     tauri::async_runtime::spawn_blocking(move || {
+        let _io = vault_io_lock().lock().unwrap();
+        recover_wallet_password(&app)?;
+        let password = {
+            let guard = store_state().lock().unwrap();
+            let store = guard.as_ref().ok_or("unlock the wallet before enabling Touch ID")?;
+            let password = store.password.as_ref().ok_or("this wallet does not use an app password")?;
+            Zeroizing::new(password.to_string())
+        };
         touch_id::authenticate(&reason)?;
-        touch_id::save_password(&password)
+        touch_id::save_password(&password)?;
+        let marker = touch_id_marker_file(&app)?;
+        if let Err(error) = touch_id::write_enabled_marker(&marker) {
+            let rollback = touch_id::delete_password();
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(format!("{error}; rollback failed: {rollback_error}")),
+            };
+        }
+        Ok(())
     })
     .await
-    .map_err(|error| format!("running Touch ID setup: {error}"))??;
-    let marker = touch_id_marker_file(&app)?;
-    if let Err(error) = touch_id::write_enabled_marker(&marker) {
-        let rollback = touch_id::delete_password();
-        return match rollback {
-            Ok(()) => Err(error),
-            Err(rollback_error) => Err(format!("{error}; rollback failed: {rollback_error}")),
-        };
-    }
-    Ok(())
+    .map_err(|error| format!("running Touch ID setup: {error}"))?
 }
 
 #[tauri::command]
 fn disable_touch_id<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let _io = vault_io_lock().lock().unwrap();
+    disable_touch_id_inner(&app)
+}
+
+fn disable_touch_id_inner<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     touch_id::delete_password()?;
-    touch_id::remove_enabled_marker(&touch_id_marker_file(&app)?)
+    touch_id::remove_enabled_marker(&touch_id_marker_file(app)?)
 }
 
 #[tauri::command]
@@ -7887,23 +7943,21 @@ async fn unlock_vault_with_touch_id<R: Runtime>(
     app: AppHandle<R>,
     reason: String,
 ) -> Result<String, String> {
-    if !touch_id::read_enabled_marker(&touch_id_marker_file(&app)?)? {
-        return Err("Touch ID unlock is not enabled".to_string());
-    }
-    // One prompt: the keychain read itself asks for the fingerprint.
-    let password = tauri::async_runtime::spawn_blocking(move || touch_id::load_password(&reason))
-        .await
-        .map_err(|error| format!("running Touch ID unlock: {error}"))??;
-    let Some(password) = password else {
-        // Enabled by an older version that kept the password unprotected: drop
-        // that copy and the marker, and have the user turn Touch ID on again.
-        disable_touch_id(app.clone())?;
-        return Err(
-            "Touch ID unlock was upgraded and must be turned on again: unlock with your password, then enable Touch ID in Settings"
-                .to_string(),
-        );
-    };
-    unlock_vault_with_password(&app, password)
+    tauri::async_runtime::spawn_blocking(move || {
+        let _io = vault_io_lock().lock().unwrap();
+        recover_wallet_password(&app)?;
+        if !touch_id::read_enabled_marker(&touch_id_marker_file(&app)?)? {
+            return Err("Touch ID unlock is not enabled".to_string());
+        }
+        // One prompt: the keychain read itself asks for the fingerprint.
+        let Some(password) = touch_id::load_password(&reason)? else {
+            disable_touch_id_inner(&app)?;
+            return Err(
+                "Touch ID unlock was upgraded and must be turned on again: unlock with your password, then enable Touch ID in Settings".into(),
+            );
+        };
+        unlock_vault_with_password(&app, password)
+    }).await.map_err(|error| format!("running Touch ID unlock: {error}"))?
 }
 
 /// Lock the wallet: drop all decrypted key material (and the app password) from
@@ -7924,7 +7978,8 @@ fn lock_vault<R: Runtime>(app: AppHandle<R>) {
 /// `delete_wallet`.
 #[tauri::command]
 fn reset_vault<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    disable_touch_id(app.clone())?;
+    let _io = vault_io_lock().lock().unwrap();
+    disable_touch_id_inner(&app)?;
     lock_vault(app.clone());
     let dir = wallets_dir(&app)?;
     match std::fs::remove_dir_all(&dir) {
@@ -7976,6 +8031,7 @@ fn connect_ledger<R: Runtime>(
     path: String,
     label: Option<String>,
 ) -> Result<WalletRef, String> {
+    let _io = vault_io_lock().lock().unwrap();
     let address = ledger::get_address(&path)?;
     let id = vault::new_wallet_id();
     let label = next_wallet_label(&app, label)?;
@@ -8043,6 +8099,8 @@ fn expose_dapp_account<R: Runtime>(app: AppHandle<R>, address: String) -> Result
 /// unchanged, so no password is needed.
 #[tauri::command]
 fn add_account<R: Runtime>(app: AppHandle<R>, wallet_id: String) -> Result<String, String> {
+    let _io = vault_io_lock().lock().unwrap();
+    recover_wallet_password(&app)?;
     let (address, metas) = {
         let mut guard = store_state().lock().unwrap();
         let store = guard.as_mut().ok_or("wallet is locked")?;
@@ -8094,6 +8152,8 @@ fn add_account<R: Runtime>(app: AppHandle<R>, wallet_id: String) -> Result<Strin
 /// Rename wallet `id` (label is plaintext metadata — no password needed).
 #[tauri::command]
 fn rename_wallet<R: Runtime>(app: AppHandle<R>, id: String, label: String) -> Result<(), String> {
+    let _io = vault_io_lock().lock().unwrap();
+    recover_wallet_password(&app)?;
     let label = label.trim().to_string();
     if label.is_empty() {
         return Err("wallet name cannot be empty".to_string());
@@ -8115,6 +8175,7 @@ fn rename_wallet<R: Runtime>(app: AppHandle<R>, id: String, label: String) -> Re
 /// remain). IRREVERSIBLE for a software wallet — the UI must confirm first.
 #[tauri::command]
 fn delete_wallet<R: Runtime>(app: AppHandle<R>, id: String) -> Result<(), String> {
+    let _io = vault_io_lock().lock().unwrap();
     let disk = read_all_keystores(&app)?;
     let deleting_last_software_wallet = disk
         .iter()
@@ -8126,7 +8187,7 @@ fn delete_wallet<R: Runtime>(app: AppHandle<R>, id: String) -> Result<(), String
             .count()
             == 1;
     if deleting_last_software_wallet {
-        disable_touch_id(app.clone())?;
+        disable_touch_id_inner(&app)?;
     }
     let path = wallet_file(&app, &id)?;
     match std::fs::remove_file(&path) {
@@ -8441,6 +8502,7 @@ pub fn run() {
             import_private_key,
             export_wallet_secret,
             unlock_vault,
+            change_password,
             unlock_vault_with_touch_id,
             touch_id_status,
             enable_touch_id,
@@ -10398,6 +10460,7 @@ mod e2e {
                 import_private_key,
                 export_wallet_secret,
                 unlock_vault,
+                change_password,
                 unlock_vault_with_touch_id,
                 touch_id_status,
                 enable_touch_id,
@@ -10510,6 +10573,17 @@ mod e2e {
         let approval = approval_webview(app);
         let error = invoke(&approval, "relay_quote", json!({"body": {}})).unwrap_err();
         assert!(error.as_str().unwrap().contains("not allowed"), "{error}");
+    }
+
+    #[test]
+    fn e2e_change_password_is_shell_only() {
+        let app = build_app();
+        for view in [dapp_webview(app), approval_webview(app)] {
+            let error = invoke(&view, "change_password", json!({
+                "currentPassword": "old-password", "newPassword": "new-password"
+            })).unwrap_err();
+            assert!(error.as_str().unwrap().contains("not allowed"), "{error}");
+        }
     }
 
     /// Serialize every test that touches process-global wallet state and reset to a

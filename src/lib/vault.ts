@@ -51,6 +51,11 @@ export type TouchIdStatus = {
   enabled: boolean;
 };
 
+export type ChangePasswordResult = {
+  touchIdEnabled: boolean;
+  warning: string | null;
+};
+
 type RustStatus = {
   exists: boolean;
   unlocked: boolean;
@@ -305,6 +310,12 @@ export async function unlockVault(password: string): Promise<void> {
   }
   await invoke<string>("unlock_vault", { password });
   await refreshVaultStatus();
+}
+
+/** Re-encrypt every software wallet; keys stay in the native backend. */
+export async function changePassword(currentPassword: string, newPassword: string): Promise<ChangePasswordResult> {
+  if (!isTauri()) throw new Error("Password changes are only available in the desktop app");
+  return invoke<ChangePasswordResult>("change_password", { currentPassword, newPassword });
 }
 
 /** Whether this Mac can offer Touch ID and whether this vault opted in. */

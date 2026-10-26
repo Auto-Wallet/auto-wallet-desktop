@@ -48,6 +48,11 @@ description = "Allow the shell to unlock the on-disk vault with the user's passw
 commands.allow = ["unlock_vault"]
 
 [[permission]]
+identifier = "allow-change-password"
+description = "Allow the trusted shell to change the password of all software wallets."
+commands.allow = ["change_password"]
+
+[[permission]]
 identifier = "allow-unlock-vault-with-touch-id"
 description = "Allow the shell to ask macOS Touch ID to release the protected vault password and unlock the wallet."
 commands.allow = ["unlock_vault_with_touch_id"]

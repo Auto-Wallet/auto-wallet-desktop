@@ -419,6 +419,17 @@ button.set-row:hover {
   flex: none;
   margin-top: 1px;
 }
+.change-password-note {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.change-password-modal .modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
 .export-wallet-name {
   font-family: var(--font-mono);
   color: var(--ink-3);

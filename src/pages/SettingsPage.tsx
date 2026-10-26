@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import "./SettingsPage.css";
+import { ChangePasswordModal } from "./ChangePasswordModal";
 import logoMark from "../assets/auto-desktop-mark.png";
 import {
   addChain,
@@ -77,6 +78,7 @@ export default function SettingsPage() {
   });
   const [touchIdStatus, setTouchIdStatus] = useState<TouchIdStatus | null>(null);
   const [touchIdBusy, setTouchIdBusy] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
   const touchIdEnabled = touchIdStatus !== null && touchIdStatus.enabled;
   const touchIdToggle = useToggleInit(touchIdEnabled);
   const [updated, setUpdated] = useState(false);
@@ -271,6 +273,21 @@ export default function SettingsPage() {
           wallet={exportingWallet}
           t={t}
           onClose={() => setExportingWallet(null)}
+        />
+      )}
+
+      {changingPassword && (
+        <ChangePasswordModal
+          onClose={() => setChangingPassword(false)}
+          onChanged={(result) => {
+            setTouchIdStatus((status) => status === null ? null : { ...status, enabled: result.touchIdEnabled });
+            toast(
+              result.warning === null
+                ? t("settings.passwordChanged")
+                : t("settings.passwordChangedWarning", { detail: result.warning }),
+              result.warning === null ? "ok" : "warn",
+            );
+          }}
         />
       )}
 
@@ -525,7 +542,8 @@ export default function SettingsPage() {
               {security.changePassword && (
                 <button
                   className="set-row"
-                  onClick={() => toast(t("settings.soon"), "info")}
+                  disabled={!vault.hasPassword || touchIdBusy}
+                  onClick={() => setChangingPassword(true)}
                 >
                   <span className="row-ic">
                     <Icon name="edit" size={17} />
@@ -536,7 +554,7 @@ export default function SettingsPage() {
                       {t("settings.changePasswordHint")}
                     </div>
                   </div>
-                  <span className="badge neutral">{t("settings.soon")}</span>
+                  <Icon name="chevronR" size={16} />
                 </button>
               )}
               {vault.hasPassword &&
@@ -557,7 +575,7 @@ export default function SettingsPage() {
                       data-on={touchIdToggle.dataOn}
                       aria-label={t("settings.touchId")}
                       aria-pressed={touchIdStatus.enabled}
-                      disabled={touchIdBusy}
+                      disabled={touchIdBusy || changingPassword}
                       onClick={() => void handleTouchIdToggle()}
                     >
                       <i className="t-toggle-thumb" />

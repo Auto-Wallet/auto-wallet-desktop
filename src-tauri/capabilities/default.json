@@ -67,6 +67,7 @@
     "allow-import-private-key",
     "allow-export-wallet-secret",
     "allow-unlock-vault",
+    "allow-change-password",
     "allow-unlock-vault-with-touch-id",
     "allow-touch-id-status",
     "allow-enable-touch-id",

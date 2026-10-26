@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
-import { connectLedger, enableTouchId, getTouchIdStatus, importPrivateKey, importVault, unlockVaultWithTouchId } from "./vault";
+import { changePassword, connectLedger, enableTouchId, getTouchIdStatus, importPrivateKey, importVault, unlockVaultWithTouchId } from "./vault";
 
 Object.defineProperty(globalThis, "window", {
   value: globalThis,
@@ -8,6 +8,19 @@ Object.defineProperty(globalThis, "window", {
 });
 
 afterEach(() => clearMocks());
+
+test("changes the password through the shell command and returns its Touch ID outcome", async () => {
+  const calls: Array<{ command: string; args: unknown }> = [];
+  mockIPC((command, args) => {
+    calls.push({ command, args });
+    return { touchIdEnabled: true, warning: null };
+  });
+  expect(await changePassword("current-password", "new-password")).toEqual({ touchIdEnabled: true, warning: null });
+  expect(calls).toEqual([{
+    command: "change_password",
+    args: { currentPassword: "current-password", newPassword: "new-password" },
+  }]);
+});
 
 describe("Private key import", () => {
   test("imports the key and trimmed wallet name in one command", async () => {
