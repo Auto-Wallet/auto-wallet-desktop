@@ -43,6 +43,7 @@ import {
   type WalletInfo,
 } from "../lib/vault";
 import { LedgerList, useLedgerScan } from "../lib/LedgerPicker";
+import { WalletNameField } from "../lib/WalletNameField";
 import {
   useDropdown,
   useHoverGroup,
@@ -3234,7 +3235,7 @@ function CreateWalletForm({
   );
 }
 
-function ImportWalletForm({
+export function ImportWalletForm({
   needsPassword,
   onBack,
   onDone,
@@ -3262,7 +3263,6 @@ function ImportWalletForm({
       const body = privkey.trim().replace(/^0x/i, "");
       if (!/^[0-9a-fA-F]{64}$/.test(body))
         return setError(t("lock.errPrivkey"));
-      if (!name.trim()) return setError(t("wallet.nameRequired"));
     }
     if (needsPassword) {
       if (pw.length < 8) return setError(t("lock.errShort"));
@@ -3273,7 +3273,7 @@ function ImportWalletForm({
     try {
       const ref =
         tab === "phrase"
-          ? await importVault(needsPassword ? pw : undefined, phrase)
+          ? await importVault(needsPassword ? pw : undefined, phrase, name)
           : await importPrivateKey(needsPassword ? pw : undefined, privkey, name);
       setActive(ref.address); // make the imported wallet active everywhere
       toast(t("wallet.added"));
@@ -3301,21 +3301,7 @@ function ImportWalletForm({
           {t("lock.importTab.privkey")}
         </button>
       </div>
-      {tab === "privkey" && (
-        <div className="field">
-          <label className="field-label" htmlFor="import-wallet-name">{t("wallet.walletName")}</label>
-          <input
-            id="import-wallet-name"
-            className="input"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder={t("wallet.walletName")}
-            autoComplete="off"
-            disabled={busy}
-            required
-          />
-        </div>
-      )}
+      <WalletNameField value={name} onChange={setName} disabled={busy} />
       {tab === "phrase" ? (
         <textarea
           className="textarea mono"
@@ -3367,7 +3353,7 @@ function ImportWalletForm({
   );
 }
 
-function LedgerForm({
+export function LedgerForm({
   onBack,
   onDone,
 }: {
@@ -3375,6 +3361,7 @@ function LedgerForm({
   onDone: () => void;
 }) {
   const { t } = useT();
+  const [name, setName] = useState("");
   const {
     accounts,
     page,
@@ -3390,11 +3377,12 @@ function LedgerForm({
     setActive(ref.address); // make the connected Ledger account active everywhere
     toast(t("wallet.added"));
     onDone();
-  });
+  }, name);
   const showList = started && (accounts.length > 0 || loading);
 
   return (
     <div className="add-form">
+      <WalletNameField value={name} onChange={setName} disabled={connecting} />
       {showList ? (
         <LedgerList
           accounts={accounts}
@@ -3564,15 +3552,7 @@ function SafeForm({
           }}
         />
       </div>
-      <div className="field">
-        <label className="field-label">{t("safe.name")}</label>
-        <input
-          className="input"
-          value={label}
-          placeholder={t("safe.namePlaceholder")}
-          onChange={(event) => setLabel(event.target.value)}
-        />
-      </div>
+      <WalletNameField value={label} onChange={setLabel} placeholder={t("safe.namePlaceholder")} disabled={busy} />
       <div className="field">
         <label className="field-label">{t("safe.serviceUrl")}</label>
         <input
@@ -3643,7 +3623,7 @@ function SafeForm({
   );
 }
 
-function WatchForm({
+export function WatchForm({
   onBack,
   onDone,
 }: {
@@ -3652,11 +3632,12 @@ function WatchForm({
 }) {
   const { t } = useT();
   const [val, setVal] = useState("");
+  const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   function submit() {
     try {
-      addWatchAccount(val);
+      addWatchAccount(val, name);
       toast(t("wallet.added"));
       onDone();
     } catch (e) {
@@ -3680,6 +3661,7 @@ function WatchForm({
           onKeyDown={(e) => e.key === "Enter" && submit()}
         />
       </div>
+      <WalletNameField value={name} onChange={setName} />
       {error && (
         <div className="lock-err">
           <Icon name="alert" size={16} /> {error}

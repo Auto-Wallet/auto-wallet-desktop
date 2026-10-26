@@ -173,12 +173,45 @@
 }
 
 .nav-section {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 10.5px;
   letter-spacing: 0.1em;
   font-weight: 700;
   color: var(--ink-4);
   padding: 16px 11px 6px;
   text-transform: uppercase;
+}
+.tabs-close-all {
+  position: relative;
+  flex: none;
+  min-height: 28px;
+  padding: 3px 5px;
+  margin-right: -5px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink-3);
+  font: inherit;
+  font-size: 10.5px;
+  letter-spacing: normal;
+  cursor: pointer;
+  transition: background-color 0.13s, color 0.13s;
+}
+.tabs-close-all::after {
+  content: "";
+  position: absolute;
+  inset: -6px -3px;
+}
+.tabs-close-all:hover:not(:disabled) {
+  background: var(--brand-soft);
+  color: var(--brand-ink);
+}
+.tabs-close-all:disabled {
+  opacity: 0.5;
+  cursor: wait;
 }
 
 /* opened dApp tabs */

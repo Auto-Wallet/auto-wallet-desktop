@@ -126,7 +126,8 @@ function demoStatus(): VaultState {
 function demoAddWallet(kind: VaultKind, label = `Wallet ${demoWallets.length + 1}`): WalletRef {
   const id = `demo-${++demoSeq}`;
   const address = nextDemoAddr();
-  demoWallets.push({ id, label, kind, accounts: [address] });
+  const walletLabel = label.trim() || `Wallet ${demoWallets.length + 1}`;
+  demoWallets.push({ id, label: walletLabel, kind, accounts: [address] });
   if (kind !== "ledger") demoHasPassword = true;
   demoLocked = false;
   demoActive = address;
@@ -164,13 +165,13 @@ export async function createVault(password?: string): Promise<{ mnemonic: string
 }
 
 /** Add a wallet from a recovery phrase. */
-export async function importVault(password: string | undefined, mnemonic: string): Promise<WalletRef> {
+export async function importVault(password: string | undefined, mnemonic: string, name = ""): Promise<WalletRef> {
   if (!isTauri()) {
-    const ref = demoAddWallet("hd");
+    const ref = demoAddWallet("hd", name);
     set(demoStatus());
     return ref;
   }
-  const ref = await invoke<WalletRef>("import_vault", { password, mnemonic: mnemonic.trim() });
+  const ref = await invoke<WalletRef>("import_vault", { password, mnemonic: mnemonic.trim(), label: name.trim() });
   await refreshVaultStatus();
   return ref;
 }
@@ -179,10 +180,9 @@ export async function importVault(password: string | undefined, mnemonic: string
 export async function importPrivateKey(
   password: string | undefined,
   privateKey: string,
-  name: string,
+  name = "",
 ): Promise<WalletRef> {
   const label = name.trim();
-  if (!label) throw new Error("wallet name cannot be empty");
   if (!isTauri()) {
     const ref = demoAddWallet("privkey", label);
     set(demoStatus());
@@ -229,13 +229,13 @@ export async function listLedgerAddresses(start: number, count: number): Promise
 }
 
 /** Add a Ledger account at `path` as a new wallet (no password). */
-export async function connectLedger(path: string): Promise<WalletRef> {
+export async function connectLedger(path: string, name = ""): Promise<WalletRef> {
   if (!isTauri()) {
-    const ref = demoAddWallet("ledger");
+    const ref = demoAddWallet("ledger", name);
     set(demoStatus());
     return ref;
   }
-  const ref = await invoke<WalletRef>("connect_ledger", { path });
+  const ref = await invoke<WalletRef>("connect_ledger", { path, label: name.trim() });
   await refreshVaultStatus();
   return ref;
 }

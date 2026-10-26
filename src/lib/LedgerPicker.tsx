@@ -18,7 +18,7 @@ function errText(e: unknown): string {
   return String(e);
 }
 
-export function useLedgerScan(onConnected: (ref: WalletRef) => void) {
+export function useLedgerScan(onConnected: (ref: WalletRef) => void, name = "") {
   const [accounts, setAccounts] = useState<LedgerAccount[]>([]);
   const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(false); // scanning a page
@@ -68,14 +68,14 @@ export function useLedgerScan(onConnected: (ref: WalletRef) => void) {
       setConnecting(true);
       setError(null);
       try {
-        const ref = await connectLedger(acct.path);
+        const ref = await connectLedger(acct.path, name);
         onConnected(ref);
       } catch (e) {
         setError(errText(e));
         setConnecting(false);
       }
     },
-    [onConnected],
+    [onConnected, name],
   );
 
   return { accounts, page, loading, connecting, started, error, scan, nextPage, prevPage, pick };

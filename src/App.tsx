@@ -12,6 +12,7 @@ import OkxPage from "./pages/OkxPage";
 import LockScreen from "./pages/LockScreen";
 import { ensureDapp, type Dapp } from "./lib/dapps";
 import { forgetDappLoad } from "./lib/dappLoadState";
+import { closeDappTabs } from "./lib/dappTabs";
 import {
   closeDapp,
   dappLabel,
@@ -283,6 +284,9 @@ function App() {
   // just shows/hides them. VISION feature ②③.
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [closingTabs, setClosingTabs] = useState(false);
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
 
   function openTab(dapp: Dapp) {
@@ -317,6 +321,27 @@ function App() {
       setActiveId(next?.id ?? null);
       setPage(next ? "browser" : "dapps");
     }
+  }
+
+  async function closeAllTabs() {
+    if (closingTabs) return;
+    setClosingTabs(true);
+    const { closed, failed } = await closeDappTabs(tabs.map((tab) => tab.id));
+    const closedIds = new Set(closed);
+    setTabs((current) => current.filter((tab) => !closedIds.has(tab.id)));
+    // The user may switch pages or tabs while the native views are closing.
+    const selected = activeIdRef.current;
+    if (selected !== null && closedIds.has(selected)) {
+      setActiveId(null);
+      setPage((current) => current === "browser" ? "dapps" : current);
+    }
+    if (failed.length > 0) {
+      for (const failure of failed) {
+        console.error(`[AutoDesktop] close dApp failed for ${failure.id}`, failure.error);
+      }
+      toast(t("dapps.closeFailed"), "warn");
+    }
+    setClosingTabs(false);
   }
 
   useEffect(() => {
@@ -358,6 +383,8 @@ function App() {
           setPage("browser");
         }}
         onCloseTab={closeTab}
+        onCloseAllTabs={() => void closeAllTabs()}
+        closingTabs={closingTabs}
       />
 
       <main className="main">
@@ -481,6 +508,8 @@ function Sidebar({
   activeId,
   onOpenTab,
   onCloseTab,
+  onCloseAllTabs,
+  closingTabs,
 }: {
   collapsed: boolean;
   onToggle: () => void;
@@ -490,6 +519,8 @@ function Sidebar({
   activeId: string | null;
   onOpenTab: (id: string) => void;
   onCloseTab: (id: string) => void;
+  onCloseAllTabs: () => void;
+  closingTabs: boolean;
 }) {
   const { t } = useT();
   const theme = useEffectiveTheme();
@@ -542,7 +573,16 @@ function Sidebar({
         {tabs.length > 0 && (
           <>
             {!collapsed ? (
-              <div className="nav-section">{t("nav.opened")}</div>
+              <div className="nav-section">
+                <span>{t("nav.opened")}</span>
+                <button
+                  className="tabs-close-all"
+                  onClick={onCloseAllTabs}
+                  disabled={closingTabs}
+                >
+                  {t("dapps.closeAll")}
+                </button>
+              </div>
             ) : (
               <div style={{ height: 12 }} />
             )}

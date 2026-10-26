@@ -7471,8 +7471,14 @@ fn read_all_keystores<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<vault::Keyst
     Ok(out)
 }
 
-/// Default label for the next wallet ("Wallet N", N = count + 1).
-fn next_wallet_label<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
+/// Use the optional import name, or "Wallet N" (N = count + 1) when left blank.
+fn next_wallet_label<R: Runtime>(app: &AppHandle<R>, label: Option<String>) -> Result<String, String> {
+    if let Some(name) = label {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
     Ok(format!("Wallet {}", read_all_keystores(app)?.len() + 1))
 }
 
@@ -7626,7 +7632,7 @@ fn create_vault<R: Runtime>(
     let (pw, store_pw) = resolve_app_password(&app, password)?;
     let mnemonic = vault::generate_mnemonic()?;
     let id = vault::new_wallet_id();
-    let label = next_wallet_label(&app)?;
+    let label = next_wallet_label(&app, None)?;
     let (accounts, metas) = derive_hd_accounts(&mnemonic, 1)?;
     let mut ks = vault::seal(&pw, &mnemonic, "hd", metas)?;
     ks.id = id.clone();
@@ -7654,11 +7660,12 @@ fn import_vault<R: Runtime>(
     app: AppHandle<R>,
     password: Option<String>,
     mnemonic: String,
+    label: Option<String>,
 ) -> Result<WalletRef, String> {
     vault::validate_mnemonic(&mnemonic)?;
     let (pw, store_pw) = resolve_app_password(&app, password)?;
     let id = vault::new_wallet_id();
-    let label = next_wallet_label(&app)?;
+    let label = next_wallet_label(&app, label)?;
     let (accounts, metas) = derive_hd_accounts(&mnemonic, 1)?;
     let mut ks = vault::seal(&pw, &mnemonic, "hd", metas)?;
     ks.id = id.clone();
@@ -7683,12 +7690,9 @@ fn import_private_key<R: Runtime>(
     app: AppHandle<R>,
     password: Option<String>,
     private_key: String,
-    label: String,
+    label: Option<String>,
 ) -> Result<WalletRef, String> {
-    let label = label.trim().to_string();
-    if label.is_empty() {
-        return Err("wallet name cannot be empty".to_string());
-    }
+    let label = next_wallet_label(&app, label)?;
     // Validate + canonicalize to 0x-lowercase-hex before sealing, so unlock
     // re-derives the same address deterministically.
     let key = vault::parse_private_key(&private_key)?;
@@ -7967,10 +7971,14 @@ fn ledger_addresses(start: u32, count: u32) -> Result<Vec<LedgerAccount>, String
 /// Ledger keystore (path + address; no secret at rest), and add it to the store
 /// (no password). Returns the new wallet's id + address.
 #[tauri::command]
-fn connect_ledger<R: Runtime>(app: AppHandle<R>, path: String) -> Result<WalletRef, String> {
+fn connect_ledger<R: Runtime>(
+    app: AppHandle<R>,
+    path: String,
+    label: Option<String>,
+) -> Result<WalletRef, String> {
     let address = ledger::get_address(&path)?;
     let id = vault::new_wallet_id();
-    let label = next_wallet_label(&app)?;
+    let label = next_wallet_label(&app, label)?;
     let metas = vec![vault::AccountMeta {
         index: 0,
         address: address.clone(),

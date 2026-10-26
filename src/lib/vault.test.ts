@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
-import { enableTouchId, getTouchIdStatus, importPrivateKey, unlockVaultWithTouchId } from "./vault";
+import { connectLedger, enableTouchId, getTouchIdStatus, importPrivateKey, importVault, unlockVaultWithTouchId } from "./vault";
 
 Object.defineProperty(globalThis, "window", {
   value: globalThis,
@@ -32,13 +32,31 @@ describe("Private key import", () => {
     ]);
   });
 
-  test("rejects a blank name before importing a wallet", async () => {
-    const calls: string[] = [];
-    mockIPC((command) => { calls.push(command); });
+});
 
-    await expect(importPrivateKey(undefined, "test-key", " \t ")).rejects.toThrow("wallet name cannot be empty");
-    expect(calls).toEqual([]);
-  });
+describe("Optional names for every vault import", () => {
+  const imports = [
+    { command: "import_private_key", run: (name?: string) => importPrivateKey(undefined, "test-key", name) },
+    { command: "import_vault", run: (name?: string) => importVault(undefined, "test phrase", name) },
+    { command: "connect_ledger", run: (name?: string) => connectLedger("m/44'/60'/0'/0/0", name) },
+  ];
+  for (const entry of imports) {
+    test(`${entry.command} accepts a custom, blank, or omitted name`, async () => {
+      const labels: unknown[] = [];
+      mockIPC((command, args) => {
+        if (command === "vault_status") return {
+          exists: true, unlocked: true, has_password: true, wallets: [], active: "0x1234",
+        };
+        expect(command).toBe(entry.command);
+        labels.push((args as { label: string }).label);
+        return { id: "imported", address: "0x1234" };
+      });
+      for (const name of ["  Savings  ", " \t ", undefined]) {
+        expect(await entry.run(name)).toEqual({ id: "imported", address: "0x1234" });
+      }
+      expect(labels).toEqual(["Savings", "", ""]);
+    });
+  }
 });
 
 describe("Touch ID vault bridge", () => {

@@ -4,6 +4,7 @@ import logoMark from "../assets/auto-desktop-mark.png";
 import { useT } from "../lib/i18n";
 import { Icon } from "../lib/icons";
 import { LedgerList, useLedgerScan } from "../lib/LedgerPicker";
+import { WalletNameField } from "../lib/WalletNameField";
 import { useSegPill, useShake } from "../lib/transitions";
 import {
   createVault,
@@ -224,7 +225,7 @@ function CreateForm({ onBack, onCreated }: { onBack: () => void; onCreated: (m: 
   );
 }
 
-function ImportForm({ onBack, onDone }: { onBack: () => void; onDone: () => void }) {
+export function ImportForm({ onBack, onDone }: { onBack: () => void; onDone: () => void }) {
   const { t } = useT();
   const [tab, setTab] = useState<"phrase" | "privkey">("phrase");
   const segRef = useSegPill<HTMLDivElement>(tab);
@@ -245,7 +246,6 @@ function ImportForm({ onBack, onDone }: { onBack: () => void; onDone: () => void
     } else {
       const body = privkey.trim().replace(/^0x/i, "");
       if (!/^[0-9a-fA-F]{64}$/.test(body)) return setError(t("lock.errPrivkey"));
-      if (!name.trim()) return setError(t("wallet.nameRequired"));
     }
     if (pw.length < 8) {
       pwShake.shake();
@@ -258,7 +258,7 @@ function ImportForm({ onBack, onDone }: { onBack: () => void; onDone: () => void
     setBusy(true);
     setError(null);
     try {
-      if (tab === "phrase") await importVault(pw, phrase);
+      if (tab === "phrase") await importVault(pw, phrase, name);
       else await importPrivateKey(pw, privkey, name);
       onDone();
     } catch (e) {
@@ -281,21 +281,7 @@ function ImportForm({ onBack, onDone }: { onBack: () => void; onDone: () => void
         </button>
       </div>
 
-      {tab === "privkey" && (
-        <div className="field">
-          <label className="field-label" htmlFor="import-wallet-name">{t("wallet.walletName")}</label>
-          <input
-            id="import-wallet-name"
-            className="input"
-            value={name}
-            onChange={(e) => { setName(e.target.value); setError(null); }}
-            placeholder={t("wallet.walletName")}
-            autoComplete="off"
-            disabled={busy}
-            required
-          />
-        </div>
-      )}
+      <WalletNameField value={name} onChange={(value) => { setName(value); setError(null); }} disabled={busy} />
       {tab === "phrase" ? (
         <div className="field">
           <label className="field-label">{t("lock.recoveryPhrase")}</label>
@@ -357,10 +343,11 @@ function ImportForm({ onBack, onDone }: { onBack: () => void; onDone: () => void
   );
 }
 
-function LedgerPanel({ onBack, onDone }: { onBack: () => void; onDone: () => void }) {
+export function LedgerPanel({ onBack, onDone }: { onBack: () => void; onDone: () => void }) {
   const { t } = useT();
+  const [name, setName] = useState("");
   const { accounts, page, loading, connecting, started, error, scan, nextPage, prevPage, pick } =
-    useLedgerScan(onDone);
+    useLedgerScan(onDone, name);
   const showList = started && (accounts.length > 0 || loading);
 
   return (
@@ -375,6 +362,7 @@ function LedgerPanel({ onBack, onDone }: { onBack: () => void; onDone: () => voi
         </div>
       </div>
 
+      <WalletNameField value={name} onChange={setName} disabled={connecting} />
       {showList ? (
         <LedgerList
           accounts={accounts}
