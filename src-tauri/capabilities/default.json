@@ -18,6 +18,7 @@
     "allow-sync-menu-overlay",
     "allow-resolve-dapp-dialog",
     "allow-reload-dapp",
+    "allow-navigate-dapp",
     "allow-go-back-dapp",
     "allow-hide-dapp",
     "allow-close-dapp",

@@ -1,4 +1,5 @@
 import "./BrowserView.css";
+import { BrowserUrlInput } from "./BrowserUrlInput";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useChains, type Chain } from "../lib/chains";
@@ -19,6 +20,7 @@ import {
   goBackDapp,
   hideDapp,
   isTauri,
+  navigateDapp,
   openDapp,
   rectOf,
   reloadDapp,
@@ -57,14 +59,12 @@ export default function BrowserView({ tab, onBack }: { tab: Tab; onBack: () => v
 
   const [focus, setFocus] = useState(false);
   const [currentUrl, setCurrentUrl] = useState(dapp.url);
-  const [url, setUrl] = useState(dapp.url);
   const [reloadNonce, setReloadNonce] = useState(0);
   const [reloading, setReloading] = useState(false);
   const [dappLoading, setDappLoading] = useState(() => !hasDappLoaded(label));
 
   useEffect(() => {
     setCurrentUrl(dapp.url);
-    setUrl(dapp.url);
     setDappLoading(!hasDappLoaded(label));
   }, [dapp.url, label]);
 
@@ -75,7 +75,6 @@ export default function BrowserView({ tab, onBack }: { tab: Tab; onBack: () => v
     void listen<{ label: string; url: string }>("dapp-navigated", (event) => {
       if (event.payload?.label !== label) return;
       setCurrentUrl(event.payload.url);
-      setUrl(event.payload.url);
     }).then((fn) => {
       if (disposed) fn();
       else unlisten = fn;
@@ -94,7 +93,6 @@ export default function BrowserView({ tab, onBack }: { tab: Tab; onBack: () => v
       if (event.payload?.label !== label) return;
       markDappLoaded(label);
       setCurrentUrl(event.payload.url);
-      setUrl(event.payload.url);
       setDappLoading(false);
 
       const el = contentRef.current;
@@ -200,6 +198,16 @@ export default function BrowserView({ tab, onBack }: { tab: Tab; onBack: () => v
     void goBackDapp(label).catch((e) => reportDappControlError("go_back_dapp", label, e));
   }
 
+  async function handleNavigate(target: string) {
+    setDappLoading(true);
+    if (native) {
+      await navigateDapp(label, target);
+    } else {
+      setReloadNonce((n) => n + 1);
+    }
+    setCurrentUrl(target);
+  }
+
   return (
     <div className="browser">
       <header className="browser-bar">
@@ -221,23 +229,20 @@ export default function BrowserView({ tab, onBack }: { tab: Tab; onBack: () => v
           </span>
           <DappIcon
             className="url-fav"
-            url={dapp.url}
+            url={currentUrl}
             name={dapp.name}
             refreshAt={dapp.iconRefreshAt}
             size={18}
             radius={5}
           />
-          <input
-            value={url}
-            spellCheck={false}
-            onChange={(e) => setUrl(e.target.value)}
-            onFocus={(e) => {
-              setFocus(true);
-              e.target.select();
-            }}
-            onBlur={() => {
-              setFocus(false);
-              setUrl(currentUrl);
+          <BrowserUrlInput
+            currentUrl={currentUrl}
+            onFocusChange={setFocus}
+            onNavigate={handleNavigate}
+            onError={(error) => {
+              setDappLoading(false);
+              reportDappControlError("navigate_dapp", label, error);
+              toast(t("browser.navigationFailed"), "warn");
             }}
           />
           <Icon name="external" size={15} />
@@ -260,7 +265,7 @@ export default function BrowserView({ tab, onBack }: { tab: Tab; onBack: () => v
             <iframe
               key={reloadNonce}
               className="dapp-frame"
-              src={dapp.url}
+              src={currentUrl}
               title={dapp.name}
               onLoad={() => {
                 markDappLoaded(label);
@@ -269,7 +274,7 @@ export default function BrowserView({ tab, onBack }: { tab: Tab; onBack: () => v
               }}
             />
             <div className="frame-note">
-              <Icon name="shieldCheck" size={15} /> In the desktop app, <b>{hostOf(dapp.url)}</b> loads in a
+              <Icon name="shieldCheck" size={15} /> In the desktop app, <b>{hostOf(currentUrl)}</b> loads in a
               native webview with <code>window.ethereum</code> injected.
             </div>
           </>

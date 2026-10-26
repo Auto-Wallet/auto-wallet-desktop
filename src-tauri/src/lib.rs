@@ -3287,9 +3287,9 @@ fn resolve_dapp_dialog(id: String, action: String, value: Option<String>) -> Res
 //
 // The shell drives the native `dapp` child webview: navigate it to the chosen
 // dApp and place it over the `.browser-content` rect (measured in JS, sent here).
-// These commands are reachable ONLY from the trusted shell — they are app
-// commands with no ACL permission entry, and the verified ACL rule is that a
-// *remote* webview calling a bare app command is denied ("Plugin not found").
+// These commands are reachable ONLY from the trusted shell — their permissions
+// in permissions/dapp-browser.toml are granted only by capabilities/default.json,
+// scoped to the shell webview.
 // So an untrusted dApp can never reposition or navigate any webview; the e2e
 // tests assert that denial.
 // ---------------------------------------------------------------------------
@@ -3760,6 +3760,28 @@ async fn sync_menu_overlay<R: Runtime>(
         .map_err(|e| e.to_string())?;
     overlay.show().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Navigate an existing tab. Shell-only; dApps are never granted this command.
+#[tauri::command]
+fn navigate_dapp<R: Runtime>(
+    app: AppHandle<R>,
+    label: String,
+    url: String,
+) -> Result<(), String> {
+    validate_dapp_label(&label)?;
+    let target: tauri::Url = url
+        .parse()
+        .map_err(|e| format!("navigate_dapp: invalid url {url}: {e}"))?;
+    if !matches!(target.scheme(), "http" | "https") {
+        return Err(format!("navigate_dapp: refusing non-http(s) url: {url}"));
+    }
+    let dapp = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("navigate_dapp: webview not found: {label}"))?;
+    dapp.navigate(target).map_err(|e| e.to_string())?;
+    app.emit("dapp-navigated", DappNavigationEvent { label, url })
+        .map_err(|e| e.to_string())
 }
 
 /// Reload a tab webview. Shell-only; dApps are never granted this command.
@@ -8354,6 +8376,7 @@ pub fn run() {
             sync_toast_overlay,
             sync_menu_overlay,
             reload_dapp,
+            navigate_dapp,
             go_back_dapp,
             hide_dapp,
             show_dapp,
@@ -10331,6 +10354,7 @@ mod e2e {
                 sync_toast_overlay,
                 sync_menu_overlay,
                 reload_dapp,
+                navigate_dapp,
                 go_back_dapp,
                 hide_dapp,
                 show_dapp,
@@ -11834,6 +11858,7 @@ mod e2e {
                 json!({ "id": "dlg-1", "action": "ok", "value": null }),
             ),
             ("reload_dapp", json!({ "label": "dapp-9" })),
+            ("navigate_dapp", json!({ "label": "dapp-9", "url": "https://evil.example/" })),
             ("go_back_dapp", json!({ "label": "dapp-9" })),
             ("hide_dapp", json!({ "label": "dapp-9" })),
             ("close_dapp", json!({ "label": "dapp-9" })),
@@ -12137,5 +12162,46 @@ mod e2e {
 
         invoke(&shell, "close_dapp", json!({ "label": "dapp-0" }))
             .expect("shell close_dapp should succeed");
+    }
+
+    #[test]
+    fn e2e_shell_navigates_existing_dapp() {
+        let app = build_app();
+        let dapp = dapp_webview(app);
+        let shell = shell_webview(app);
+        let target = "https://app.aave.com/markets/?market=base#supply";
+        invoke(
+            &shell,
+            "navigate_dapp",
+            json!({ "label": "dapp-0", "url": target }),
+        )
+        .expect("shell can navigate the existing tab");
+        assert_eq!(dapp.url().unwrap().as_str(), target);
+    }
+
+    #[test]
+    fn e2e_navigate_dapp_rejects_invalid_targets() {
+        let app = build_app();
+        let dapp = dapp_webview(app);
+        let original_url = dapp.url().unwrap();
+        let shell = shell_webview(app);
+        for (label, url, expected) in [
+            ("shell", "https://app.aave.com/", "invalid dapp label"),
+            ("approval", "https://app.aave.com/", "invalid dapp label"),
+            ("dapp-0", "file:///etc/passwd", "refusing non-http"),
+            ("dapp-0", "javascript:alert(1)", "refusing non-http"),
+            ("dapp-0", "data:text/html,x", "refusing non-http"),
+            ("dapp-0", "not a URL", "invalid url"),
+            ("dapp-missing", "https://app.aave.com/", "webview not found"),
+        ] {
+            let error = invoke(
+                &shell,
+                "navigate_dapp",
+                json!({ "label": label, "url": url }),
+            )
+            .unwrap_err();
+            assert!(error.as_str().unwrap().contains(expected), "{error}");
+            assert_eq!(dapp.url().unwrap(), original_url);
+        }
     }
 }

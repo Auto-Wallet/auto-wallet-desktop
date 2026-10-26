@@ -71,6 +71,11 @@ export function reloadDapp(label: string): Promise<void> {
   return invoke("reload_dapp", { label });
 }
 
+/** Navigate an existing tab without replacing its webview or wallet provider. */
+export function navigateDapp(label: string, url: string): Promise<void> {
+  return invoke("navigate_dapp", { label, url });
+}
+
 /** Navigate back inside the native dApp tab webview. When the page has no
  * history entry, the webview stays on the current page. */
 export function goBackDapp(label: string): Promise<void> {

@@ -32,6 +32,11 @@ description = "Allow the shell to reload a dapp tab webview."
 commands.allow = ["reload_dapp"]
 
 [[permission]]
+identifier = "allow-navigate-dapp"
+description = "Allow the shell to navigate an existing dapp tab to an HTTP or HTTPS URL."
+commands.allow = ["navigate_dapp"]
+
+[[permission]]
 identifier = "allow-go-back-dapp"
 description = "Allow the shell to navigate back inside a dapp tab webview."
 commands.allow = ["go_back_dapp"]
