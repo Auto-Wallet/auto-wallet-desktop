@@ -318,6 +318,9 @@ pub fn open(password: &str, ks: &Keystore) -> Result<Zeroizing<String>, String> 
     let nonce = B64
         .decode(ks.nonce.as_ref().ok_or_else(|| no("nonce"))?)
         .map_err(|e| e.to_string())?;
+    if nonce.len() != 12 {
+        return Err("invalid keystore nonce length".into());
+    }
     let ciphertext = B64
         .decode(ks.ciphertext.as_ref().ok_or_else(|| no("ciphertext"))?)
         .map_err(|e| e.to_string())?;
@@ -339,6 +342,15 @@ mod tests {
     // exact key/address hard-coded as DEV_PRIVKEY_HEX/SPIKE_ACCOUNT today, so it is a
     // strong external oracle for the whole BIP-39→44 pipeline. NOT a real secret.
     const TEST_MNEMONIC: &str = "test test test test test test test test test test test junk";
+
+    #[test]
+    fn malformed_nonce_returns_an_error_instead_of_panicking() {
+        let mut wallet = seal("test-password", TEST_MNEMONIC, "hd", vec![]).unwrap();
+        wallet.nonce = Some(B64.encode([0_u8; 11]));
+        let result = std::panic::catch_unwind(|| open("test-password", &wallet));
+        assert!(result.is_ok(), "corrupt wallet metadata must not poison vault locks");
+        assert!(result.unwrap().is_err());
+    }
 
     #[test]
     fn derive_matches_known_anvil_vectors() {

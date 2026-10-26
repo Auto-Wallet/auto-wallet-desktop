@@ -7380,8 +7380,24 @@ fn vault_io_lock() -> &'static Mutex<()> {
     &LOCK
 }
 
+struct VaultIoGuard {
+    _file: std::fs::File,
+    _process: std::sync::MutexGuard<'static, ()>,
+}
+
+fn lock_vault_io<R: Runtime>(app: &AppHandle<R>) -> Result<VaultIoGuard, String> {
+    let process = vault_io_lock().lock().map_err(|_| "vault lock was poisoned; restart the app")?;
+    let parent = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let file = password_change::lock_directory(&parent)?;
+    Ok(VaultIoGuard { _file: file, _process: process })
+}
+
 fn recover_wallet_password<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    password_change::recover(&wallets_dir(app)?, &touch_id_marker_file(app)?)
+    let recovery = password_change::recover(&wallets_dir(app)?, &touch_id_marker_file(app)?)?;
+    if recovery.used_backup {
+        log_diagnostic(app, "repaired password change from verified encrypted recovery copy");
+    }
+    Ok(())
 }
 
 fn wallets_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
@@ -7428,11 +7444,7 @@ fn read_keystore(path: &Path) -> Result<Option<vault::Keystore>, String> {
 }
 
 fn write_keystore(path: &Path, ks: &vault::Keystore) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("creating app dir: {e}"))?;
-    }
-    let json = serde_json::to_vec_pretty(ks).map_err(|e| e.to_string())?;
-    std::fs::write(path, json).map_err(|e| format!("writing keystore: {e}"))
+    password_change::write_keystore(path, ks)
 }
 
 /// Fold a legacy single-vault `vault.json` into `wallets/<id>.json` (assigning an
@@ -7441,12 +7453,19 @@ fn write_keystore(path: &Path, ks: &vault::Keystore) -> Result<(), String> {
 fn migrate_legacy_keystore<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let base = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let legacy = base.join(LEGACY_KEYSTORE_FILE);
-    if !legacy.exists() {
+    password_change::finish_legacy_cleanup(&legacy)?;
+    if !legacy.try_exists().map_err(|e| format!("checking legacy vault: {e}"))? {
         return Ok(());
+    }
+    if password_change::recovery_pending(&wallets_dir(app)?)? {
+        return Err("legacy vault exists alongside unfinished password recovery; all files preserved".into());
     }
     if let Some(mut ks) = read_keystore(&legacy)? {
         if ks.id.is_empty() {
-            ks.id = vault::new_wallet_id();
+            // The same interrupted migration must reuse the same destination,
+            // rather than accumulate another encrypted key on every retry.
+            let identity = serde_json::to_vec(&ks).map_err(|e| e.to_string())?;
+            ks.id = format!("legacy-{}", hex::encode(Sha256::digest(identity)));
         }
         if ks.label.is_empty() {
             ks.label = "Wallet 1".to_string();
@@ -7454,8 +7473,7 @@ fn migrate_legacy_keystore<R: Runtime>(app: &AppHandle<R>) -> Result<(), String>
         let dest = wallet_file(app, &ks.id)?;
         write_keystore(&dest, &ks)?;
     }
-    let _ = std::fs::remove_file(&legacy);
-    Ok(())
+    password_change::retire_legacy(&legacy)
 }
 
 /// Every wallet keystore on disk, in stable creation order (migrating the legacy
@@ -7467,7 +7485,8 @@ fn read_all_keystores<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<vault::Keyst
     let mut out: Vec<vault::Keystore> = Vec::new();
     match std::fs::read_dir(&dir) {
         Ok(entries) => {
-            for entry in entries.flatten() {
+            for entry in entries {
+                let entry = entry.map_err(|e| format!("reading wallet directory entry: {e}"))?;
                 let path = entry.path();
                 if path.extension().and_then(|x| x.to_str()) == Some("json") {
                     if let Some(ks) = read_keystore(&path)? {
@@ -7504,26 +7523,31 @@ fn resolve_app_password<R: Runtime>(
     app: &AppHandle<R>,
     provided: Option<String>,
 ) -> Result<(Zeroizing<String>, Option<Zeroizing<String>>), String> {
-    if let Some(pw) = store_state()
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|s| s.password.clone())
-    {
+    let cached = {
+        store_state().lock().unwrap().as_ref().and_then(|s| s.password.clone())
+    };
+    if let Some(pw) = cached {
+        verify_disk_password(app, &pw).map_err(|error| format!(
+            "wallet files or password changed; lock and unlock again before adding a wallet: {error}"
+        ))?;
         return Ok((pw, None));
     }
     let pw = provided.ok_or("a password is required to add this wallet")?;
     if pw.len() < 8 {
         return Err("password must be at least 8 characters".to_string());
     }
-    if let Some(existing) = read_all_keystores(app)?
-        .iter()
-        .find(|k| k.kind == "hd" || k.kind == "privkey")
-    {
-        vault::open(&pw, existing).map_err(|_| "incorrect password".to_string())?;
-    }
+    verify_disk_password(app, &pw)?;
     let pw = Zeroizing::new(pw);
     Ok((pw.clone(), Some(pw)))
+}
+
+fn verify_disk_password<R: Runtime>(app: &AppHandle<R>, password: &str) -> Result<(), String> {
+    for wallet in read_all_keystores(app)? {
+        if wallet.kind == "hd" || wallet.kind == "privkey" {
+            vault::open(password, &wallet)?;
+        }
+    }
+    Ok(())
 }
 
 /// One wallet for the shell switcher: its id, label, secret kind, and account
@@ -7608,7 +7632,7 @@ struct ExportedSecret {
 /// account. The shell renders the switcher + gates the lock screen from this.
 #[tauri::command]
 fn vault_status<R: Runtime>(app: AppHandle<R>) -> Result<VaultStatus, String> {
-    let _io = vault_io_lock().lock().unwrap();
+    let _io = lock_vault_io(&app)?;
     let disk = read_all_keystores(&app)?;
     let has_password = disk.iter().any(|k| k.kind == "hd" || k.kind == "privkey");
     let guard = store_state().lock().unwrap();
@@ -7643,7 +7667,7 @@ fn create_vault<R: Runtime>(
     app: AppHandle<R>,
     password: Option<String>,
 ) -> Result<NewVault, String> {
-    let _io = vault_io_lock().lock().unwrap();
+    let _io = lock_vault_io(&app)?;
     let (pw, store_pw) = resolve_app_password(&app, password)?;
     let mnemonic = vault::generate_mnemonic()?;
     let id = vault::new_wallet_id();
@@ -7677,7 +7701,7 @@ fn import_vault<R: Runtime>(
     mnemonic: String,
     label: Option<String>,
 ) -> Result<WalletRef, String> {
-    let _io = vault_io_lock().lock().unwrap();
+    let _io = lock_vault_io(&app)?;
     vault::validate_mnemonic(&mnemonic)?;
     let (pw, store_pw) = resolve_app_password(&app, password)?;
     let id = vault::new_wallet_id();
@@ -7708,7 +7732,7 @@ fn import_private_key<R: Runtime>(
     private_key: String,
     label: Option<String>,
 ) -> Result<WalletRef, String> {
-    let _io = vault_io_lock().lock().unwrap();
+    let _io = lock_vault_io(&app)?;
     let label = next_wallet_label(&app, label)?;
     // Validate + canonicalize to 0x-lowercase-hex before sealing, so unlock
     // re-derives the same address deterministically.
@@ -7750,7 +7774,7 @@ fn export_wallet_secret<R: Runtime>(
     wallet_id: String,
     password: String,
 ) -> Result<ExportedSecret, String> {
-    let _io = vault_io_lock().lock().unwrap();
+    let _io = lock_vault_io(&app)?;
     recover_wallet_password(&app)?;
     let path = wallet_file(&app, &wallet_id)?;
     let ks = read_keystore(&path)?.ok_or("wallet not found")?;
@@ -7769,7 +7793,7 @@ fn export_wallet_secret<R: Runtime>(
 /// ANY software wallet exists, do nothing: the app stays locked until the user
 /// enters the password (which also loads the Ledger wallets).
 fn boot_load_ledger_only<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    let _io = vault_io_lock().lock().unwrap();
+    let _io = lock_vault_io(&app)?;
     let disk = read_all_keystores(app)?;
     let has_software = disk.iter().any(|k| k.kind == "hd" || k.kind == "privkey");
     if has_software || disk.is_empty() {
@@ -7800,7 +7824,7 @@ fn boot_load_ledger_only<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
 /// address.
 #[tauri::command]
 fn unlock_vault<R: Runtime>(app: AppHandle<R>, password: String) -> Result<String, String> {
-    let _io = vault_io_lock().lock().unwrap();
+    let _io = lock_vault_io(&app)?;
     unlock_vault_with_password(&app, Zeroizing::new(password))
 }
 
@@ -7815,7 +7839,7 @@ async fn change_password<R: Runtime>(
     let current = Zeroizing::new(current_password);
     let new = Zeroizing::new(new_password);
     tauri::async_runtime::spawn_blocking(move || {
-        let _io = vault_io_lock().lock().unwrap();
+        let _io = lock_vault_io(&app)?;
         let wallets = read_all_keystores(&app)?;
         let mut guard = store_state().lock().unwrap();
         let store = guard.as_mut().ok_or("unlock the wallet before changing the password")?;
@@ -7891,7 +7915,7 @@ fn touch_id_marker_file<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, Strin
 
 #[tauri::command]
 fn touch_id_status<R: Runtime>(app: AppHandle<R>) -> Result<touch_id::TouchIdStatus, String> {
-    let _io = vault_io_lock().lock().unwrap();
+    let _io = lock_vault_io(&app)?;
     recover_wallet_password(&app)?;
     let enabled = touch_id::read_enabled_marker(&touch_id_marker_file(&app)?)?;
     Ok(touch_id::TouchIdStatus {
@@ -7903,7 +7927,7 @@ fn touch_id_status<R: Runtime>(app: AppHandle<R>) -> Result<touch_id::TouchIdSta
 #[tauri::command]
 async fn enable_touch_id<R: Runtime>(app: AppHandle<R>, reason: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let _io = vault_io_lock().lock().unwrap();
+        let _io = lock_vault_io(&app)?;
         recover_wallet_password(&app)?;
         let password = {
             let guard = store_state().lock().unwrap();
@@ -7911,6 +7935,7 @@ async fn enable_touch_id<R: Runtime>(app: AppHandle<R>, reason: String) -> Resul
             let password = store.password.as_ref().ok_or("this wallet does not use an app password")?;
             Zeroizing::new(password.to_string())
         };
+        verify_disk_password(&app, &password)?;
         touch_id::authenticate(&reason)?;
         touch_id::save_password(&password)?;
         let marker = touch_id_marker_file(&app)?;
@@ -7929,7 +7954,7 @@ async fn enable_touch_id<R: Runtime>(app: AppHandle<R>, reason: String) -> Resul
 
 #[tauri::command]
 fn disable_touch_id<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    let _io = vault_io_lock().lock().unwrap();
+    let _io = lock_vault_io(&app)?;
     disable_touch_id_inner(&app)
 }
 
@@ -7944,7 +7969,7 @@ async fn unlock_vault_with_touch_id<R: Runtime>(
     reason: String,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let _io = vault_io_lock().lock().unwrap();
+        let _io = lock_vault_io(&app)?;
         recover_wallet_password(&app)?;
         if !touch_id::read_enabled_marker(&touch_id_marker_file(&app)?)? {
             return Err("Touch ID unlock is not enabled".to_string());
@@ -7978,7 +8003,7 @@ fn lock_vault<R: Runtime>(app: AppHandle<R>) {
 /// `delete_wallet`.
 #[tauri::command]
 fn reset_vault<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    let _io = vault_io_lock().lock().unwrap();
+    let _io = lock_vault_io(&app)?;
     disable_touch_id_inner(&app)?;
     lock_vault(app.clone());
     let dir = wallets_dir(&app)?;
@@ -8031,7 +8056,7 @@ fn connect_ledger<R: Runtime>(
     path: String,
     label: Option<String>,
 ) -> Result<WalletRef, String> {
-    let _io = vault_io_lock().lock().unwrap();
+    let _io = lock_vault_io(&app)?;
     let address = ledger::get_address(&path)?;
     let id = vault::new_wallet_id();
     let label = next_wallet_label(&app, label)?;
@@ -8099,7 +8124,7 @@ fn expose_dapp_account<R: Runtime>(app: AppHandle<R>, address: String) -> Result
 /// unchanged, so no password is needed.
 #[tauri::command]
 fn add_account<R: Runtime>(app: AppHandle<R>, wallet_id: String) -> Result<String, String> {
-    let _io = vault_io_lock().lock().unwrap();
+    let _io = lock_vault_io(&app)?;
     recover_wallet_password(&app)?;
     let (address, metas) = {
         let mut guard = store_state().lock().unwrap();
@@ -8152,7 +8177,7 @@ fn add_account<R: Runtime>(app: AppHandle<R>, wallet_id: String) -> Result<Strin
 /// Rename wallet `id` (label is plaintext metadata — no password needed).
 #[tauri::command]
 fn rename_wallet<R: Runtime>(app: AppHandle<R>, id: String, label: String) -> Result<(), String> {
-    let _io = vault_io_lock().lock().unwrap();
+    let _io = lock_vault_io(&app)?;
     recover_wallet_password(&app)?;
     let label = label.trim().to_string();
     if label.is_empty() {
@@ -8175,7 +8200,7 @@ fn rename_wallet<R: Runtime>(app: AppHandle<R>, id: String, label: String) -> Re
 /// remain). IRREVERSIBLE for a software wallet — the UI must confirm first.
 #[tauri::command]
 fn delete_wallet<R: Runtime>(app: AppHandle<R>, id: String) -> Result<(), String> {
-    let _io = vault_io_lock().lock().unwrap();
+    let _io = lock_vault_io(&app)?;
     let disk = read_all_keystores(&app)?;
     let deleting_last_software_wallet = disk
         .iter()
@@ -10414,6 +10439,9 @@ mod e2e {
     /// dist needed) — the same reason run() compiles. mock_context()'s empty ACL
     /// would reject every command with "Plugin not found".
     fn build_app() -> &'static tauri::App<MockRuntime> {
+        let mut context = build_context::<MockRuntime>();
+        // Tests must never read, recover, or write the real user's vault.
+        context.config_mut().identifier = format!("com.autowallet.desktop.test-{}", vault::new_wallet_id());
         let app = mock_builder()
             .plugin(tauri_plugin_clipboard_manager::init())
             .invoke_handler(tauri::generate_handler![
@@ -10481,7 +10509,7 @@ mod e2e {
                 set_auto_lock_minutes,
                 set_app_menu_language
             ])
-            .build(build_context())
+            .build(context)
             .expect("failed to build mock app");
         Box::leak(Box::new(app))
     }
@@ -10584,6 +10612,148 @@ mod e2e {
             })).unwrap_err();
             assert!(error.as_str().unwrap().contains("not allowed"), "{error}");
         }
+    }
+
+    #[test]
+    fn e2e_adding_wallet_rejects_a_password_changed_by_another_instance() {
+        let _guard = wallet_guard();
+        let app = build_app();
+        let (_accounts, metas) = derive_hd_accounts(TEST_MNEMONIC, 1).unwrap();
+        let mut disk = vault::seal("external-password", TEST_MNEMONIC, "hd", metas).unwrap();
+        disk.id = "external-wallet".into();
+        write_keystore(&wallet_file(app.handle(), &disk.id).unwrap(), &disk).unwrap();
+        store_state().lock().unwrap().as_mut().unwrap().password = Some(Zeroizing::new("cached-old-password".into()));
+
+        let result = create_vault(app.handle().clone(), None);
+        let files = read_all_keystores(app.handle()).unwrap();
+        let base = app.path().app_data_dir().unwrap();
+        std::fs::remove_dir_all(base).unwrap();
+        assert!(result.is_err(), "must not create a wallet encrypted with a stale password");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].id, "external-wallet");
+    }
+
+    #[test]
+    fn e2e_password_change_preserves_keys_across_lock_unlock_and_import() {
+        let _guard = wallet_guard();
+        let app = build_app();
+        let shell = webview(app, "shell", tauri::WebviewUrl::App("index.html".into()));
+        let (_accounts, metas) = derive_hd_accounts(TEST_MNEMONIC, 2).unwrap();
+        let addresses: Vec<String> = metas.iter().map(|m| m.address.clone()).collect();
+        let mut hd = vault::seal("old-password", TEST_MNEMONIC, "hd", metas).unwrap();
+        hd.id = "hd-wallet".into();
+        hd.label = "Seed wallet".into();
+        let (key, raw_address) = vault::derive_account(TEST_MNEMONIC, 2).unwrap();
+        let raw_secret = Zeroizing::new(format!("0x{}", hex::encode(key.to_bytes())));
+        let mut raw = vault::seal("old-password", &raw_secret, "privkey", vec![vault::AccountMeta { index: 0, address: raw_address.clone() }]).unwrap();
+        raw.id = "raw-wallet".into();
+        raw.label = "Private key wallet".into();
+        let (_, ledger_address) = vault::derive_account(TEST_MNEMONIC, 4).unwrap();
+        let mut ledger = vault::ledger_keystore("m/44'/60'/4'/0/0", vec![vault::AccountMeta { index: 0, address: ledger_address }]);
+        ledger.id = "ledger-wallet".into();
+        for wallet in [&hd, &raw, &ledger] {
+            write_keystore(&wallet_file(app.handle(), &wallet.id).unwrap(), wallet).unwrap();
+        }
+        let ledger_path = wallet_file(app.handle(), &ledger.id).unwrap();
+        let ledger_before = std::fs::read(&ledger_path).unwrap();
+        invoke(&shell, "unlock_vault", json!({ "password": "old-password" })).unwrap();
+        let mut signer_addresses = addresses.clone();
+        signer_addresses.push(raw_address);
+        let public_keys: Vec<Vec<u8>> = signer_addresses.iter().map(|address|
+            with_key_for(address, |key| key.verifying_key().to_encoded_point(true).as_bytes().to_vec()).unwrap()
+        ).collect();
+        let result = invoke(&shell, "change_password", json!({ "currentPassword": "old-password", "newPassword": "new-password" })).unwrap();
+        assert_eq!(result, json!({ "touchIdEnabled": false, "warning": null }));
+        assert_eq!(std::fs::read(&ledger_path).unwrap(), ledger_before);
+
+        // A subsequent import must use the new in-memory password as well.
+        let (extra, extra_address) = vault::derive_account(TEST_MNEMONIC, 3).unwrap();
+        let extra_secret = Zeroizing::new(format!("0x{}", hex::encode(extra.to_bytes())));
+        let imported = invoke(&shell, "import_private_key", json!({ "privateKey": extra_secret.as_str(), "label": "Imported after password change" })).unwrap();
+        assert_eq!(imported["address"], extra_address);
+        lock_vault(app.handle().clone());
+        assert_eq!(invoke(&shell, "unlock_vault", json!({ "password": "old-password" })).unwrap_err(), json!("incorrect password"));
+        invoke(&shell, "unlock_vault", json!({ "password": "new-password" })).unwrap();
+        for (address, expected) in signer_addresses.iter().zip(&public_keys) {
+            assert_eq!(with_key_for(address, |key| key.verifying_key().to_encoded_point(true).as_bytes().to_vec()).unwrap(), *expected);
+        }
+        assert_eq!(with_key_for(&extra_address, |key| key.verifying_key().to_encoded_point(true).as_bytes().to_vec()).unwrap(), extra.verifying_key().to_encoded_point(true).as_bytes());
+        assert_eq!(invoke(&shell, "export_wallet_secret", json!({ "walletId": hd.id, "password": "new-password" })).unwrap()["secret"], TEST_MNEMONIC);
+        assert_eq!(invoke(&shell, "export_wallet_secret", json!({ "walletId": raw.id, "password": "new-password" })).unwrap()["secret"], raw_secret.as_str());
+        assert_eq!(std::fs::read(&ledger_path).unwrap(), ledger_before);
+        std::fs::remove_dir_all(app.path().app_data_dir().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn e2e_legacy_migration_cannot_hide_a_failed_cleanup_before_password_change() {
+        use std::os::unix::fs::PermissionsExt;
+        let app = build_app();
+        let base = app.path().app_data_dir().unwrap();
+        std::fs::create_dir_all(base.join(WALLETS_DIR)).unwrap();
+        let (_accounts, metas) = derive_hd_accounts(TEST_MNEMONIC, 1).unwrap();
+        let legacy = vault::seal("old-password", TEST_MNEMONIC, "hd", metas).unwrap();
+        write_keystore(&base.join(LEGACY_KEYSTORE_FILE), &legacy).unwrap();
+        let permissions = std::fs::metadata(&base).unwrap().permissions();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = migrate_legacy_keystore(app.handle());
+        let repeated = migrate_legacy_keystore(app.handle());
+        let copies = std::fs::read_dir(base.join(WALLETS_DIR)).unwrap().count();
+        let legacy_survived = base.join(LEGACY_KEYSTORE_FILE).is_file();
+        std::fs::set_permissions(&base, permissions).unwrap();
+        std::fs::remove_dir_all(base).unwrap();
+        assert!(result.is_err(), "must not rotate passwords while an old-password legacy file can be imported again");
+        assert!(repeated.is_err());
+        assert_eq!(copies, 1, "retrying migration must not keep creating duplicate key files");
+        assert!(legacy_survived);
+    }
+
+    #[test]
+    fn e2e_legacy_migration_does_not_mix_an_old_vault_into_pending_rotation() {
+        let app = build_app();
+        let base = app.path().app_data_dir().unwrap();
+        let dir = base.join(WALLETS_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_accounts, metas) = derive_hd_accounts(TEST_MNEMONIC, 1).unwrap();
+        let legacy = vault::seal("old-password", TEST_MNEMONIC, "hd", metas).unwrap();
+        let legacy_path = base.join(LEGACY_KEYSTORE_FILE);
+        write_keystore(&legacy_path, &legacy).unwrap();
+        let original = std::fs::read(&legacy_path).unwrap();
+        std::fs::write(dir.join("password-change.pending"), b"damaged pending change").unwrap();
+        let result = read_all_keystores(app.handle());
+        let unchanged = std::fs::read(&legacy_path).map(|bytes| bytes == original).unwrap_or(false);
+        let count = std::fs::read_dir(&dir).unwrap().count();
+        std::fs::remove_dir_all(base).unwrap();
+        assert!(result.is_err());
+        assert!(unchanged, "legacy ciphertext must remain intact until password recovery is resolved");
+        assert_eq!(count, 1, "must not introduce another old-password wallet file");
+    }
+
+    #[test]
+    fn e2e_legacy_wallet_can_migrate_change_password_and_unlock_the_same_keys() {
+        let _guard = wallet_guard();
+        let app = build_app();
+        let shell = webview(app, "shell", tauri::WebviewUrl::App("index.html".into()));
+        let (_accounts, metas) = derive_hd_accounts(TEST_MNEMONIC, 2).unwrap();
+        let expected_addresses: Vec<String> = metas.iter().map(|meta| meta.address.clone()).collect();
+        let legacy = vault::seal("old-password", TEST_MNEMONIC, "hd", metas).unwrap();
+        let base = app.path().app_data_dir().unwrap();
+        write_keystore(&base.join(LEGACY_KEYSTORE_FILE), &legacy).unwrap();
+        invoke(&shell, "unlock_vault", json!({ "password": "old-password" })).unwrap();
+        assert!(!base.join(LEGACY_KEYSTORE_FILE).exists());
+        assert!(!base.join("vault.migrated").exists());
+        let before = read_all_keystores(app.handle()).unwrap();
+        assert_eq!(before.len(), 1);
+        assert!(before[0].id.starts_with("legacy-"));
+        invoke(&shell, "change_password", json!({ "currentPassword": "old-password", "newPassword": "new-password" })).unwrap();
+        lock_vault(app.handle().clone());
+        assert_eq!(invoke(&shell, "unlock_vault", json!({ "password": "old-password" })).unwrap_err(), json!("incorrect password"));
+        invoke(&shell, "unlock_vault", json!({ "password": "new-password" })).unwrap();
+        let status = invoke(&shell, "vault_status", json!({})).unwrap();
+        assert_eq!(status["wallets"][0]["accounts"], json!(expected_addresses));
+        assert_eq!(invoke(&shell, "export_wallet_secret", json!({ "walletId": before[0].id, "password": "new-password" })).unwrap()["secret"], TEST_MNEMONIC);
+        assert_eq!(read_all_keystores(app.handle()).unwrap().len(), 1);
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     /// Serialize every test that touches process-global wallet state and reset to a

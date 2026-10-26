@@ -43,6 +43,7 @@ import {
 import { txExplorerUrl } from "./lib/explorer";
 import { useMenuOverlay, type MenuOverlayPayload } from "./lib/menuOverlay";
 import { SidebarFooter } from "./SidebarFooter";
+import { VaultLoadError } from "./VaultLoadError";
 import { setNativeMenuLanguage } from "./lib/nativeMenu";
 import { autoUpdater, useAutoUpdate } from "./lib/autoUpdater";
 
@@ -121,14 +122,32 @@ function App() {
   // lock/setup screen until the wallet is unlocked for this session. A backend
   // already unlocked on boot (vite HMR during dev) opens the gate without a prompt.
   const [sessionUnlocked, setSessionUnlocked] = useState(false);
+  const [vaultLoadError, setVaultLoadError] = useState<string | null>(null);
+  const [loadingVault, setLoadingVault] = useState(false);
+  const vaultLoadRequest = useRef(0);
   const phaseRef = useRef(vault.phase);
   phaseRef.current = vault.phase;
+  const loadVault = useCallback(async () => {
+    const request = ++vaultLoadRequest.current;
+    setLoadingVault(true);
+    try {
+      await refreshVaultStatus();
+      if (request !== vaultLoadRequest.current) return;
+      setVaultLoadError(null);
+      if (phaseRef.current === "unlocked") setSessionUnlocked(true);
+    } catch (error) {
+      if (request === vaultLoadRequest.current) {
+        setVaultLoadError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (request === vaultLoadRequest.current) setLoadingVault(false);
+    }
+  }, []);
   useEffect(() => {
     void loadChains();
-    void refreshVaultStatus().then(() => {
-      if (phaseRef.current === "unlocked") setSessionUnlocked(true);
-    });
-  }, []);
+    void loadVault();
+    return () => { vaultLoadRequest.current++; };
+  }, [loadVault]);
   useEffect(() => {
     if (vault.phase === "locked" || vault.phase === "absent")
       setSessionUnlocked(false);
@@ -351,6 +370,9 @@ function App() {
     }
   }, [page, tabs]);
 
+  if (vaultLoadError !== null) {
+    return <VaultLoadError t={t} error={vaultLoadError} busy={loadingVault} onRetry={() => void loadVault()} />;
+  }
   if (vault.phase === "loading") {
     return (
       <div className="boot">
