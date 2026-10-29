@@ -3,6 +3,7 @@ name = "auto-desktop"
 version = "0.2.83"
 description = "AutoDesktop — a lightweight desktop wallet & dApp browser"
 authors = ["you"]
+license = "MIT"
 edition = "2021"
 rust-version = "1.89"
 

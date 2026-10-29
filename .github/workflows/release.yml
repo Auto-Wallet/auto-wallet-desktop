@@ -457,6 +457,14 @@ jobs:
         with:
           draft: false
           generate_release_notes: true
+          # Prepended to the generated notes. SignPath Foundation asks for this
+          # heading on the download/release page as well as the repository home page.
+          body: |
+            ## Code signing policy
+
+            Free code signing provided by SignPath.io, certificate by SignPath Foundation.
+
+            Team roles, the privacy policy, and Windows uninstall steps: https://github.com/Auto-Wallet/auto-wallet-desktop#code-signing-policy
           files: |
             dist/*.dmg
             dist/*.zip

@@ -6,6 +6,7 @@ AutoDesktop is the desktop counterpart to the **Auto Wallet** browser extension.
 
 > **Product north star & the 6 core features:** [VISION.md](VISION.md)
 > **How to work in this repo (architecture, security boundary, conventions):** [CLAUDE.md](CLAUDE.md)
+> **Code signing policy** (team roles, privacy policy, Windows uninstall): [Code signing policy](#code-signing-policy)
 
 ## Related Code
 
@@ -112,6 +113,60 @@ scripts/                build-injected + CDP/native verification harnesses
 `tauri-driver`/WebdriverIO (the official UI-E2E path) **does not work on macOS** — Apple ships no WKWebView WebDriver. So the wallet bridge is E2E-tested **in-process** with `tauri::test`'s mock runtime (`mod e2e` in `lib.rs`), which drives the real `invoke('wallet_request') → command → handle_rpc` pipeline — including the `dapp.json` ACL grant and trustworthy-origin derivation — without a GUI. Offline tests run by default; the live network-forward test is `#[ignore]`d (run with `cargo test -- --ignored`).
 
 The frontend onboarding/Settings flows are verified visually via a Chrome CDP harness against the vite dev server (`scripts/*-test.ts`), and natively via macOS `screencapture` (`scripts/native-shot.sh`).
+
+## Code signing policy
+
+Free code signing provided by SignPath.io, certificate by SignPath Foundation.
+
+Windows releases are built from this repository by [`.github/workflows/release.yml`](.github/workflows/release.yml) on a `v*` tag. The current published installer is `AutoDesktop_<version>_windows_x86_64_setup.exe` on the [GitHub Releases](https://github.com/Auto-Wallet/auto-wallet-desktop/releases) page (`auto-desktop` in older links is this same repository).
+
+### Team roles
+
+- Committers and reviewers: [Members team](https://github.com/orgs/Auto-Wallet/teams/members)
+- Approvers: [Owners](https://github.com/orgs/Auto-Wallet/people?query=role%3Aowner)
+
+Committers may change this repository without an extra review. Every change from someone who is not a committer is reviewed by a team member before it lands. A team member trusted by the whole team (an Approver) approves each request to code-sign a release.
+
+### Privacy policy
+
+AutoDesktop is a desktop Ethereum wallet and dApp browser. It has no analytics or crash-reporting SDK. The diagnostic log (`autodesktop.log`), the encrypted vault, settings, and the price cache stay on this computer. Private keys are used only in the app process, after you unlock the vault and approve a signature.
+
+The app does contact other systems while it runs. Any HTTPS request reveals your IP address to that server. Several of those servers are chosen by the app, and some requests include your wallet address or a transaction you are about to sign. The Windows installer does not yet offer a switch to turn those calls off. What follows is the complete set of networked behavior in the current source.
+
+**While the app is open**
+
+- **Updates.** On startup, and about once an hour after that, the app asks GitHub whether a newer release exists (`api.github.com` and the release files for [Auto-Wallet/auto-wallet-desktop](https://github.com/Auto-Wallet/auto-wallet-desktop/releases)) and may download the installer. Installing it waits for you. The fallback update request uses the User-Agent `AutoDesktop`. No wallet data is included. [GitHub's privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-privacy-statement) applies.
+
+**On the Wallet page**
+
+- **Chain RPC.** Balances, token reads, gas, and receipts are JSON-RPC calls to the endpoint configured for each chain. Built-in chains default to public nodes (PublicNode hosts such as `ethereum-rpc.publicnode.com`, plus chain operators including BNB Chain, zkSync, Sonic, Alchemy's public World Chain endpoint, Wanchain, and others listed in the app). A release build appends this project's PublicNode API key to `*.publicnode.com` URLs. Calls such as `eth_getBalance` include the account address. A signed transaction is broadcast with `eth_sendRawTransaction`. You can replace any chain's RPC in Settings; that server then receives the same kinds of calls. A dApp you have open can also ask the wallet to forward standard Ethereum read calls, and a transaction that page already signed, to the selected chain's RPC.
+- **USD prices.** When the wallet asks for prices, and the on-disk cache is older than about 30 minutes, the app calls CoinGecko (`api.coingecko.com/api/v3/simple/price`) with coin ids and a User-Agent of `AutoDesktop/<version>`. The wallet address is not included. [CoinGecko's privacy policy](https://www.coingecko.com/en/privacy) applies.
+
+**When you turn a feature on or confirm an action**
+
+- **DeFi positions.** The Wallet page queries Zerion (`api.zerion.io`) with the account address when you enable DeFi for that account. If Zerion fails for a wallet that holds assets, the same address is sent to DeBank (`pro-openapi.debank.com`). When Zerion answers, DeBank is still asked about Uniswap v4 on chains where that wallet is active. Both calls use API keys built into the release. The same refresh reads xStake farming positions with Wanchain RPC calls. [DeBank's privacy policy](https://debank.com/privacy) applies; Zerion's own policy applies to the Zerion calls.
+- **Transaction preview.** Before you approve a signature, the approval window can POST the sender, recipient, calldata, value, gas, and chain id to WanScan's simulator at `https://balance-change-simulate-api.wanscan.org/simulate`.
+- **Swaps.** A quote or built transaction is sent to the service for the route you pick: XFlows (`xflows.wanchain.org`), Relay (`api.relay.link`, with this project's API key), and/or OKX DEX (`web3.okx.com`, signed with this project's OKX API credentials). Those requests include wallet addresses, token addresses, and amounts. An OKX status check sends the transaction hash.
+- **Safe accounts.** Importing a Safe talks to Safe's Transaction Service. The default host is `api.safe.global` (this project's API key is attached only to that host). A service URL you enter is used instead, and does not receive that key. Requests include the Safe address and transaction fields. Confirming a Safe transaction also submits the signature.
+- **Your OKX account.** The OKX page uses an API key you create and store in the operating system credential store (`com.autodesktop.wallet.okx`). Those calls go to the OKX host for the region you select (`www.okx.com`, `us.okx.com`, `eea.okx.com`, or `tr.okx.com`) and read balances and Dual Investment orders. This is separate from the project's OKX DEX credentials above.
+- **dApps and explorers.** A site you open loads in a child webview (Microsoft Edge WebView2 on Windows). That site is a third party: it sees your IP address, and after you connect it can read the selected address through the injected Ethereum provider. Favicons are requested from the site's own origin. Explorer links (Etherscan and the other explorers configured in the app) open only when you follow them. WebView2 is Microsoft's component; [Microsoft's privacy statement](https://privacy.microsoft.com/en-us/privacystatement) applies to it.
+
+**Installer**
+
+The NSIS setup (`AutoDesktop_<version>_windows_x86_64_setup.exe`) can download the Microsoft Edge WebView2 runtime from Microsoft when Windows does not already have it.
+
+## Uninstall on Windows
+
+The Windows download is the NSIS installer `AutoDesktop_<version>_windows_x86_64_setup.exe` from [GitHub Releases](https://github.com/Auto-Wallet/auto-wallet-desktop/releases). It installs for the current user, registers **AutoDesktop** with Windows, and puts the program in `%LOCALAPPDATA%\AutoDesktop`.
+
+1. Open **Settings → Apps → Installed apps**.
+2. Select **AutoDesktop**, then **Uninstall**, and confirm.
+3. The program files, Start menu entry, and desktop shortcut are removed. On the confirmation page, **Delete app data** is unchecked. Leave it unchecked to keep the encrypted vault. Check it to also delete `%APPDATA%\com.autowallet.desktop` and `%LOCALAPPDATA%\com.autowallet.desktop`. That removes the vault from this PC. The recovery phrase is the backup; the app cannot recreate a deleted vault.
+4. If you connected an OKX API key, disconnect it in the app first. The uninstaller does not remove the Windows Credential Manager entry for `com.autodesktop.wallet.okx`.
+
+An in-app update runs the installer in passive mode and does not show the delete-app-data checkbox, so an update leaves the vault in place.
+
+The portable zip `AutoDesktop_<version>_windows_x64.zip` is not registered with Windows. Close the app and delete the extracted folder. Wallet data in the folders above is left behind until you delete it yourself.
 
 ## Platform constraints (macOS / WKWebView)
 
