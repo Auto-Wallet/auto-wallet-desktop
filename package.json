@@ -2,6 +2,7 @@
   "name": "auto-desktop",
   "private": true,
   "version": "0.2.83",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
