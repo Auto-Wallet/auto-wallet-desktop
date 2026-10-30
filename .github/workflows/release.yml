@@ -322,7 +322,7 @@ jobs:
               platforms: {
                 [platform]: {
                   signature: process.env.SIG.trim(),
-                  url: `https://github.com/Auto-Wallet/auto-desktop/releases/download/${tag}/${asset}`
+                  url: `https://github.com/Auto-Wallet/auto-wallet-desktop/releases/download/${tag}/${asset}`
                 }
               }
             };
@@ -411,7 +411,7 @@ jobs:
               platforms: {
                 [platform]: {
                   signature: process.env.SIG.trim(),
-                  url: `https://github.com/Auto-Wallet/auto-desktop/releases/download/${tag}/${asset}`
+                  url: `https://github.com/Auto-Wallet/auto-wallet-desktop/releases/download/${tag}/${asset}`
                 }
               }
             };

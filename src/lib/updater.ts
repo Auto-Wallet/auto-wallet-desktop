@@ -32,7 +32,7 @@ export async function checkForUpdate(): Promise<UpdateInfo> {
       currentVersion: __APP_VERSION__,
       latestVersion: __APP_VERSION__,
       available: false,
-      releaseUrl: "https://github.com/Auto-Wallet/auto-desktop/releases",
+      releaseUrl: "https://github.com/Auto-Wallet/auto-wallet-desktop/releases",
       downloadUrl: null,
     };
   }
@@ -43,7 +43,7 @@ export async function checkForUpdate(): Promise<UpdateInfo> {
         currentVersion: __APP_VERSION__,
         latestVersion: __APP_VERSION__,
         available: false,
-        releaseUrl: "https://github.com/Auto-Wallet/auto-desktop/releases",
+        releaseUrl: "https://github.com/Auto-Wallet/auto-wallet-desktop/releases",
         downloadUrl: null,
       };
     }
@@ -51,7 +51,7 @@ export async function checkForUpdate(): Promise<UpdateInfo> {
       currentVersion: __APP_VERSION__,
       latestVersion: update.version,
       available: true,
-      releaseUrl: "https://github.com/Auto-Wallet/auto-desktop/releases/latest",
+      releaseUrl: "https://github.com/Auto-Wallet/auto-wallet-desktop/releases/latest",
       downloadUrl: null,
     };
   } catch (e) {
@@ -72,7 +72,7 @@ export async function installUpdate(
         currentVersion: __APP_VERSION__,
         latestVersion: __APP_VERSION__,
         available: false,
-        releaseUrl: "https://github.com/Auto-Wallet/auto-desktop/releases",
+        releaseUrl: "https://github.com/Auto-Wallet/auto-wallet-desktop/releases",
         downloadUrl: null,
       }
     );
@@ -89,7 +89,7 @@ export async function installUpdate(
         currentVersion: __APP_VERSION__,
         latestVersion: __APP_VERSION__,
         available: false,
-        releaseUrl: "https://github.com/Auto-Wallet/auto-desktop/releases",
+        releaseUrl: "https://github.com/Auto-Wallet/auto-wallet-desktop/releases",
         downloadUrl: null,
       };
     }
@@ -115,7 +115,7 @@ export async function installUpdate(
       latestVersion: update.version,
       available: true,
       installed: true,
-      releaseUrl: "https://github.com/Auto-Wallet/auto-desktop/releases/latest",
+      releaseUrl: "https://github.com/Auto-Wallet/auto-wallet-desktop/releases/latest",
       downloadUrl: null,
     };
   } catch (e) {

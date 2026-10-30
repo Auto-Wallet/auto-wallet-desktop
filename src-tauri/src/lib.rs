@@ -4752,7 +4752,7 @@ fn matching_release_asset(assets: &[GithubAsset]) -> Option<&GithubAsset> {
 #[tauri::command]
 async fn check_for_update() -> Result<UpdateInfo, String> {
     const LATEST_URL: &str =
-        "https://api.github.com/repos/Auto-Wallet/auto-desktop/releases/latest";
+        "https://api.github.com/repos/Auto-Wallet/auto-wallet-desktop/releases/latest";
     let current = env!("CARGO_PKG_VERSION").to_string();
     let release: GithubRelease = reqwest::Client::new()
         .get(LATEST_URL)
