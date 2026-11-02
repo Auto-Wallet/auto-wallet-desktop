@@ -491,6 +491,7 @@ const DICT: Record<Lang, Record<string, string>> = {
 
     "approval.title": "Signature request",
     "approval.idle": "No pending requests",
+    "approval.renderFailed": "This request could not be displayed, so it cannot be approved. Reject it to continue.",
     "approval.signMessage": "Sign message",
     "approval.signTyped": "Sign typed data",
     "approval.sendTx": "Send transaction",
@@ -556,6 +557,11 @@ const DICT: Record<Lang, Record<string, string>> = {
     "approval.permitNeverExpires": "Never expires",
     "approval.allowance": "Allowance",
     "approval.deadline": "Deadline",
+    "approval.permitEntry": "Allowance {n} of {total}",
+    "approval.permitExpiration": "Allowance expires",
+    "approval.permitIncomplete":
+      "Part of this permit could not be decoded, so it may grant more than shown here. Read the full message below, or reject.",
+    "approval.nativeAlsoSent": "Also sends {amount} with this call",
     "approval.rawAmount": "{n} (raw token units)",
     "approval.transferTitle": "ERC-20 Transfer",
     "approval.transferRecipient": "Recipient",
@@ -1118,6 +1124,7 @@ const DICT: Record<Lang, Record<string, string>> = {
 
     "approval.title": "签名请求",
     "approval.idle": "暂无待处理请求",
+    "approval.renderFailed": "无法显示此请求，因此不能批准。请拒绝它后继续。",
     "approval.signMessage": "签名消息",
     "approval.signTyped": "签名结构化数据",
     "approval.sendTx": "发送交易",
@@ -1182,6 +1189,10 @@ const DICT: Record<Lang, Record<string, string>> = {
     "approval.permitNeverExpires": "永不过期",
     "approval.allowance": "授权额度",
     "approval.deadline": "截止时间",
+    "approval.permitEntry": "授权 {n} / {total}",
+    "approval.permitExpiration": "授权到期",
+    "approval.permitIncomplete": "此授权有部分内容无法解码，实际授权可能比这里显示的更多。请查看下方完整消息，或直接拒绝。",
+    "approval.nativeAlsoSent": "此交易同时转出 {amount}",
     "approval.rawAmount": "{n}（代币最小单位）",
     "approval.transferTitle": "ERC-20 转账",
     "approval.transferRecipient": "收款地址",

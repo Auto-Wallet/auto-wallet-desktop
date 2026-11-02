@@ -1,3 +1,5 @@
+import { parseUnits } from '../format';
+
 // Neutral types shared by all swap providers (XFlows, Relay, …). Each
 // provider implements `SwapProvider` and exposes its own client elsewhere.
 
@@ -66,6 +68,9 @@ export interface NeutralQuote {
   netValueUsd?: number;
   amountOutUsd?: number;     // for display only
   raw: unknown;              // opaque payload for prepareSwap
+  // The inputs this quote was priced for. A quote is only ever sent for these
+  // exact inputs — see sameQuoteInputs.
+  quotedFor: QuoteParams;
 }
 
 export interface PreparedTx {
@@ -130,4 +135,35 @@ export function isEvmChainId(chainId: number): boolean {
   if (chainId > 1_000_000) return false;
   if (NON_EVM_CHAIN_IDS.has(chainId)) return false;
   return true;
+}
+
+/** fromAmount in the source token's smallest unit, or null if it isn't a
+ *  plain decimal that fits the token's decimals. */
+function rawFromAmount(p: QuoteParams): bigint | null {
+  const s = p.fromAmount.trim();
+  if (s === '' || s === '.' || !/^\d*\.?\d*$/.test(s)) return null;
+  if ((s.split('.')[1] ?? '').length > p.fromToken.decimals) return null;
+  return parseUnits(s, p.fromToken.decimals);
+}
+
+/**
+ * Whether two sets of inputs describe the same trade: same chains, tokens,
+ * raw amount, sender, recipient and slippage. A quote may be sent only for the
+ * inputs it was priced for — the user editing the amount and clicking Swap
+ * before the next quote arrived used to send the OLD quote's transaction
+ * (security review addendum #3).
+ */
+export function sameQuoteInputs(a: QuoteParams, b: QuoteParams): boolean {
+  const amountA = rawFromAmount(a);
+  return (
+    amountA !== null &&
+    amountA === rawFromAmount(b) &&
+    a.fromChainId === b.fromChainId &&
+    a.toChainId === b.toChainId &&
+    a.fromToken.address.toLowerCase() === b.fromToken.address.toLowerCase() &&
+    a.toToken.address.toLowerCase() === b.toToken.address.toLowerCase() &&
+    a.fromAddress.toLowerCase() === b.fromAddress.toLowerCase() &&
+    a.toAddress.toLowerCase() === b.toAddress.toLowerCase() &&
+    a.slippage === b.slippage
+  );
 }

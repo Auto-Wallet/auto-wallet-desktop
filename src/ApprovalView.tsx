@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Component, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./ApprovalView.css";
 import { Icon, type IconName } from "./lib/icons";
@@ -9,13 +9,17 @@ import { isTauri } from "./lib/platform";
 import { useSegPill } from "./lib/transitions";
 import { rpc } from "./lib/rpc";
 import { simulateTx, type SimulationPreview } from "./lib/simulation";
+import { createActivityReporter } from "./lib/autoLock";
 import {
   detectPermit,
   isSafeDelegateCall,
   encodeErc20Approve,
+  MAX_UINT256,
   parseApprovalDetails,
+  parseHexQuantity,
   parseTransferDetails,
   type ApprovalDetails,
+  type PermitGrant,
   type TransferDetails,
   type TypedDataPayload,
 } from "./lib/decode";
@@ -128,6 +132,22 @@ function ApprovalView() {
     const timer = setInterval(() => void refresh(), 500);
     return () => clearInterval(timer);
   }, [refresh]);
+
+  // A user reading a request here is present: report their input so the idle
+  // auto-lock waits. An open request on its own no longer holds the lock off.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const report = createActivityReporter(30_000, Date.now, () => {
+      invoke("note_user_activity").catch((e) =>
+        console.error("[approval] note_user_activity failed", e),
+      );
+    });
+    const events = ["pointerdown", "pointermove", "keydown", "wheel"] as const;
+    for (const ev of events) window.addEventListener(ev, report, { passive: true });
+    return () => {
+      for (const ev of events) window.removeEventListener(ev, report);
+    };
+  }, []);
 
   const current = requests[0];
   const approvalDetails = useMemo(
@@ -341,6 +361,7 @@ function ApprovalView() {
               <>
                 {approvalDetails ? (
                   <ApproveEditor
+                    tx={current.tx}
                     details={approvalDetails}
                     info={approvalInfo}
                     amount={approvalAmount}
@@ -461,9 +482,25 @@ function PlainTxCard({ tx, t }: { tx: TxDisplay; t: TFn }) {
   );
 }
 
+// A decoded approve/transfer card describes the token call, but the same tx can
+// also carry native coin to the contract. Say so inside the card the user is
+// reading — the JSON tab alone is not a place anyone looks (review addendum #1).
+function NativeValueNotice({ tx, t }: { tx: TxDisplay; t: TFn }) {
+  const wei = parseHexQuantity(tx.value);
+  if (wei === 0n) return null;
+  const amount =
+    wei === null ? `${tx.value} (raw)` : `${fmtUnitsDisplay(tx.value, 18)} ${tx.symbol}`;
+  return (
+    <div className="apv-approve-error apv-native-sent">
+      <Icon name="alert" size={14} /> {t("approval.nativeAlsoSent", { amount })}
+    </div>
+  );
+}
+
 // The editable ERC-20 approve card — the single thing the user is deciding on,
 // so it renders first and standalone.
-function ApproveEditor({
+export function ApproveEditor({
+  tx,
   details,
   info,
   amount,
@@ -471,6 +508,7 @@ function ApproveEditor({
   error,
   t,
 }: {
+  tx: TxDisplay;
   details: ApprovalDetails;
   info: ApprovalTokenInfo | null;
   amount: string;
@@ -491,9 +529,21 @@ function ApproveEditor({
       />
       <Row label={t("approval.spender")} value={shortAddress(details.spender, 10, 8)} mono />
       {error && !info ? (
-        // Metadata never loaded: an editable amount is impossible, so show the
-        // explanation instead of a dead disabled input.
-        <div className="apv-approve-error">{error}</div>
+        // Metadata never loaded: an editable amount is impossible, and approving
+        // sends the dApp's calldata untouched — so the allowance in that calldata
+        // must be on screen (review addendum #2), raw if it can't be scaled.
+        <>
+          <Row
+            label={t("approval.allowance")}
+            value={
+              details.amountRaw === MAX_UINT256
+                ? t("approval.permitAmountUnlimited")
+                : t("approval.rawAmount", { n: details.amountRaw.toString() })
+            }
+            danger={details.amountRaw === MAX_UINT256}
+          />
+          <div className="apv-approve-error">{error}</div>
+        </>
       ) : (
         <div className="apv-approve-field">
           <label className="field-label">{t("approval.approveAmount")}</label>
@@ -519,6 +569,7 @@ function ApproveEditor({
           {error && <div className="apv-approve-error">{error}</div>}
         </div>
       )}
+      <NativeValueNotice tx={tx} t={t} />
     </div>
   );
 }
@@ -752,24 +803,27 @@ function formatDeadline(deadline: bigint | null, t: TFn): string {
   return new Date(Number(deadline) * 1000).toLocaleString();
 }
 
-// Full EIP-712 payload display: permit warning (spender/allowance/deadline) when
-// the signature grants token spending, then domain + primaryType + the complete
-// message. A summary line alone would be blind signing.
-function TypedDataDetails({ data, t }: { data: TypedDataPayload; t: TFn }) {
-  const permit = useMemo(() => detectPermit(data), [data]);
-  const delegateCall = useMemo(() => isSafeDelegateCall(data), [data]);
+// One allowance inside a permit: token, amount, and its own expiration (Permit2).
+function PermitGrantRows({
+  grant,
+  chainHex,
+  heading,
+  t,
+}: {
+  grant: PermitGrant;
+  chainHex: string | null;
+  heading: string | null;
+  t: TFn;
+}) {
   const [tokenMeta, setTokenMeta] = useState<{ symbol: string; decimals: number } | null>(null);
 
   useEffect(() => {
     setTokenMeta(null);
-    if (!permit?.token || !permit.chainHex || permit.amountRaw === null || permit.unlimited) return;
+    if (!grant.token || !chainHex || grant.amountRaw === null || grant.unlimited) return;
     let cancelled = false;
     // Display-only enrichment: if metadata can't load, the raw amount (the
     // ground truth) stays on screen — nothing is hidden or defaulted.
-    void Promise.all([
-      readErc20Symbol(permit.chainHex, permit.token),
-      readErc20Decimals(permit.chainHex, permit.token),
-    ])
+    void Promise.all([readErc20Symbol(chainHex, grant.token), readErc20Decimals(chainHex, grant.token)])
       .then(([symbol, decimals]) => {
         if (!cancelled) setTokenMeta({ symbol, decimals });
       })
@@ -777,18 +831,50 @@ function TypedDataDetails({ data, t }: { data: TypedDataPayload; t: TFn }) {
     return () => {
       cancelled = true;
     };
-  }, [permit?.token, permit?.chainHex, permit?.amountRaw, permit?.unlimited]);
+  }, [grant.token, chainHex, grant.amountRaw, grant.unlimited]);
 
+  const allowanceLabel = grant.unlimited
+    ? t("approval.permitAmountUnlimited")
+    : grant.amountRaw === null
+      ? "—"
+      : tokenMeta
+        ? `${formatTokenAmountForInput(grant.amountRaw, tokenMeta.decimals)} ${tokenMeta.symbol}`
+        : t("approval.rawAmount", { n: grant.amountRaw.toString() });
+
+  return (
+    <>
+      {heading && <div className="field-label apv-permit-entry">{heading}</div>}
+      <Row
+        label={t("approval.token")}
+        value={
+          grant.token === null
+            ? "—"
+            : tokenMeta
+              ? `${tokenMeta.symbol} (${shortAddress(grant.token, 8, 6)})`
+              : shortAddress(grant.token, 10, 8)
+        }
+        mono={!tokenMeta}
+        danger={grant.token === null}
+      />
+      <Row label={t("approval.allowance")} value={allowanceLabel} danger={grant.unlimited || grant.amountRaw === null} />
+      {grant.expiration !== null && (
+        <Row
+          label={t("approval.permitExpiration")}
+          value={formatDeadline(grant.expiration, t)}
+          danger={grant.expiration >= 253402300800n}
+        />
+      )}
+    </>
+  );
+}
+
+// Full EIP-712 payload display: permit warning (spender/allowance/deadline) when
+// the signature grants token spending, then domain + primaryType + the complete
+// message. A summary line alone would be blind signing.
+export function TypedDataDetails({ data, t }: { data: TypedDataPayload; t: TFn }) {
+  const permit = useMemo(() => detectPermit(data), [data]);
+  const delegateCall = useMemo(() => isSafeDelegateCall(data), [data]);
   const domain = (data.domain ?? {}) as Record<string, unknown>;
-  const allowanceLabel = !permit
-    ? ""
-    : permit.unlimited
-      ? t("approval.permitAmountUnlimited")
-      : permit.amountRaw === null
-        ? "—"
-        : tokenMeta
-          ? `${formatTokenAmountForInput(permit.amountRaw, tokenMeta.decimals)} ${tokenMeta.symbol}`
-          : t("approval.rawAmount", { n: permit.amountRaw.toString() });
 
   return (
     <div className="apv-typed">
@@ -806,21 +892,27 @@ function TypedDataDetails({ data, t }: { data: TypedDataPayload; t: TFn }) {
             <Icon name="alert" size={15} /> {t("approval.permitWarnTitle")}
           </div>
           <div className="apv-permit-body">{t("approval.permitWarnBody")}</div>
-          {permit.token && (
-            <Row
-              label={t("approval.token")}
-              value={
-                tokenMeta
-                  ? `${tokenMeta.symbol} (${shortAddress(permit.token, 8, 6)})`
-                  : shortAddress(permit.token, 10, 8)
-              }
-              mono={!tokenMeta}
-            />
+          {permit.incomplete && (
+            <div className="apv-permit-body danger">{t("approval.permitIncomplete")}</div>
           )}
           {permit.spender && (
             <Row label={t("approval.spender")} value={shortAddress(permit.spender, 10, 8)} mono />
           )}
-          <Row label={t("approval.allowance")} value={allowanceLabel} danger={permit.unlimited} />
+          {/* Every grant, never just the first: a batch can hide an unlimited
+              allowance behind a harmless first entry (review #2). */}
+          {permit.grants.map((grant, i) => (
+            <PermitGrantRows
+              key={i}
+              grant={grant}
+              chainHex={permit.chainHex}
+              heading={
+                permit.grants.length > 1
+                  ? t("approval.permitEntry", { n: i + 1, total: permit.grants.length })
+                  : null
+              }
+              t={t}
+            />
+          ))}
           <Row
             label={t("approval.deadline")}
             value={formatDeadline(permit.deadline, t)}
@@ -860,7 +952,7 @@ function TypedDataDetails({ data, t }: { data: TypedDataPayload; t: TFn }) {
 }
 
 // Decoded ERC-20 transfer details (read-only) for a dApp transaction.
-function TransferSection({
+export function TransferSection({
   tx,
   details,
   t,
@@ -925,6 +1017,7 @@ function TransferSection({
         }
       />
       {metaFailed && <div className="apv-approve-error">{t("approval.tokenMetaFailed")}</div>}
+      <NativeValueNotice tx={tx} t={t} />
     </div>
   );
 }
@@ -1019,4 +1112,69 @@ function formatTokenAmountForInput(value: bigint, decimals: number): string {
   return `${whole}.${frac.toString().padStart(decimals, "0").replace(/0+$/, "")}`;
 }
 
-export default ApprovalView;
+// Last line of defence for anything the decoders above still miss: a render
+// error must not leave a blank window with the request stuck at the head of the
+// queue. The fallback cannot approve — it only rejects, then retries the view.
+class ApprovalErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null; busy: boolean }
+> {
+  state = { error: null as Error | null, busy: false };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error) {
+    console.error("[approval] render failed", error);
+  }
+
+  private rejectCurrent = async () => {
+    this.setState({ busy: true });
+    try {
+      const list = await invoke<PendingRequest[]>("get_pending_requests");
+      if (list[0]) await invoke("reject_request", { id: list[0].id });
+    } finally {
+      this.setState({ error: null, busy: false });
+    }
+  };
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return <ApprovalRenderFailed busy={this.state.busy} onReject={this.rejectCurrent} error={this.state.error} />;
+  }
+}
+
+function ApprovalRenderFailed({
+  busy,
+  onReject,
+  error,
+}: {
+  busy: boolean;
+  onReject: () => void;
+  error: Error;
+}) {
+  const { t } = useT();
+  return (
+    <div className="approval idle">
+      <div>
+        <div className="idle-mark">
+          <Icon name="alert" size={26} />
+        </div>
+        <p>{t("approval.renderFailed")}</p>
+        <pre className="apv-msg">{error.message}</pre>
+        <button className="btn btn-ghost btn-lg" disabled={busy} onClick={onReject}>
+          {t("approval.reject")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export default function ApprovalWindow() {
+  return (
+    <ApprovalErrorBoundary>
+      <ApprovalView />
+    </ApprovalErrorBoundary>
+  );
+}

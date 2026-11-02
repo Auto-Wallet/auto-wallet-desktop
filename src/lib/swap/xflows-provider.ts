@@ -251,6 +251,7 @@ export function toNeutralQuote(q: XfQuote, params: QuoteParams): NeutralQuote {
     amountOutUsd,
     netValueUsd,
     raw: q,
+    quotedFor: params,
   };
 }
 

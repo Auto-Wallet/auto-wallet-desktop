@@ -9,6 +9,7 @@
     "allow-reject-request",
     "allow-get-pending-requests",
     "allow-node-rpc",
-    "allow-simulate-tx"
+    "allow-simulate-tx",
+    "allow-note-user-activity"
   ]
 }

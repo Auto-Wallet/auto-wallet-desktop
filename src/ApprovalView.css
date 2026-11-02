@@ -576,6 +576,20 @@
   line-height: 1.45;
   color: var(--ink-2);
 }
+.apv-permit-body.danger {
+  color: var(--coral-2, #e5484d);
+  font-weight: 700;
+}
+/* Heading above each allowance of a batch permit. */
+.apv-permit-entry {
+  padding: 8px 0 0;
+}
+.apv-native-sent {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
 .apv-permit .apv-row {
   padding: 8px 0;
   border-bottom: 1px solid color-mix(in srgb, var(--coral-2, #e5484d) 18%, transparent);

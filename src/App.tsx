@@ -220,9 +220,9 @@ function App() {
 
   const [page, setPage] = useState<Page>("wallet");
 
-  // Auto-lock: user input in the shell restarts the backend idle timer (dApp
-  // calls restart it on the Rust side), and an idle lock sends the UI to the
-  // lock screen.
+  // Auto-lock: user input in the shell (or the approval window) restarts the
+  // backend idle timer — dApp calls deliberately do not — and an idle lock
+  // sends the UI to the lock screen.
   useEffect(() => {
     if (!isTauri()) return;
     const report = createActivityReporter(30_000, Date.now, () => {

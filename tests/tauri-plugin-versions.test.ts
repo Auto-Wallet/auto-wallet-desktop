@@ -24,3 +24,19 @@ for (const name of Object.keys(manifest.dependencies)) {
     expect(`${jsVersion[1]}.${jsVersion[2]}`).toBe(`${rustVersion[1]}.${rustVersion[2]}`);
   });
 }
+
+// GHSA-w28w-mhc8-qvjv: tauri <= 2.11.5 let one webview fetch another's queued
+// channel responses. This app runs untrusted dApp pages in webviews next to the
+// trusted wallet UI, so the lock must never fall back into that range.
+test("tauri crate is at or past the GHSA-w28w-mhc8-qvjv fix (2.11.6)", () => {
+  const block = cargoLock
+    .replace(/\r\n/g, "\n")
+    .split("[[package]]")
+    .find((b) => b.split("\n").includes('name = "tauri"'));
+  if (!block) throw new Error("tauri missing from Cargo.lock");
+  const m = block.match(/\nversion = "(\d+)\.(\d+)\.(\d+)"/);
+  if (!m) throw new Error("tauri version unreadable");
+  const [major, minor, patch] = m.slice(1).map(Number);
+  const atLeast = major > 2 || (major === 2 && (minor > 11 || (minor === 11 && patch >= 6)));
+  expect(`${major}.${minor}.${patch} patched=${atLeast}`).toBe(`${major}.${minor}.${patch} patched=true`);
+});

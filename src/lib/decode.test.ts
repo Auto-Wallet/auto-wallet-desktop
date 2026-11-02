@@ -49,6 +49,25 @@ describe("parseTransferDetails", () => {
   });
 });
 
+// Security review 2026-11-02 #5: a non-hex amount word made BigInt() throw
+// during render, which blanked the whole approval window.
+describe("malformed amount words return null instead of throwing", () => {
+  const junkWords = ["z".repeat(64), `${"0".repeat(63)} `, `-${"1".repeat(63)}`, `0x${"1".repeat(62)}`];
+  for (const junk of junkWords) {
+    test(`approve with amount word ${JSON.stringify(junk.slice(0, 6))}…`, () => {
+      expect(parseApprovalDetails({ to: TOKEN, data: `0x095ea7b3${pad(SPENDER)}${junk}` })).toBeNull();
+    });
+    test(`transfer with amount word ${JSON.stringify(junk.slice(0, 6))}…`, () => {
+      expect(parseTransferDetails({ to: TOKEN, data: `0xa9059cbb${pad(RECIPIENT)}${junk}` })).toBeNull();
+    });
+    test(`transferFrom with amount word ${JSON.stringify(junk.slice(0, 6))}…`, () => {
+      expect(
+        parseTransferDetails({ to: TOKEN, data: `0x23b872dd${pad(OWNER)}${pad(RECIPIENT)}${junk}` }),
+      ).toBeNull();
+    });
+  }
+});
+
 describe("parseApprovalDetails / encodeErc20Approve", () => {
   test("decode → re-encode round-trips exactly", () => {
     const amount = 500_000_000n; // 500 USDC
@@ -76,8 +95,8 @@ describe("detectPermit", () => {
     });
     expect(p).not.toBeNull();
     expect(p!.spender).toBe(SPENDER);
-    expect(p!.token).toBe(TOKEN);
-    expect(p!.amountRaw).toBe(250_000_000n);
+    expect(p!.grants[0].token).toBe(TOKEN);
+    expect(p!.grants[0].amountRaw).toBe(250_000_000n);
     expect(p!.unlimited).toBe(false);
     expect(p!.deadline).toBe(deadline);
     expect(p!.chainHex).toBe("0x1");
@@ -99,7 +118,7 @@ describe("detectPermit", () => {
       message: { holder: OWNER, spender: SPENDER, nonce: 1, expiry: 0, allowed: true },
     });
     expect(p!.unlimited).toBe(true);
-    expect(p!.amountRaw).toBeNull();
+    expect(p!.grants[0].amountRaw).toBeNull();
   });
 
   test("Permit2 PermitSingle: token/amount/expiration come from details", () => {
@@ -112,14 +131,14 @@ describe("detectPermit", () => {
         sigDeadline: "1780001234",
       },
     });
-    expect(p!.token).toBe(TOKEN);
+    expect(p!.grants[0].token).toBe(TOKEN);
     expect(p!.spender).toBe(SPENDER);
     expect(p!.unlimited).toBe(true); // max uint160 = Permit2 "infinite"
     expect(p!.deadline).toBe(1_780_001_234n);
     expect(p!.chainHex).toBe("0x89");
   });
 
-  test("Permit2 PermitBatch: first details entry is surfaced", () => {
+  test("Permit2 PermitBatch with a single entry", () => {
     const p = detectPermit({
       domain: { name: "Permit2", chainId: 1 },
       primaryType: "PermitBatch",
@@ -129,8 +148,88 @@ describe("detectPermit", () => {
         sigDeadline: "1700000600",
       },
     });
-    expect(p!.token).toBe(TOKEN);
-    expect(p!.amountRaw).toBe(777n);
+    expect(p!.grants[0].token).toBe(TOKEN);
+    expect(p!.grants[0].amountRaw).toBe(777n);
+  });
+
+  // Security review 2026-11-02 #2: the summary used to describe only the first
+  // batch entry, so an unlimited grant in entry 2 never reached the screen.
+  test("Permit2 PermitBatch: every entry is surfaced, unlimited in a later entry flags the whole permit", () => {
+    const TOKEN_B = "0x6B175474E89094C44Da98b954EedeAC495271d0F"; // DAI
+    const p = detectPermit({
+      domain: { name: "Permit2", chainId: 1 },
+      primaryType: "PermitBatch",
+      message: {
+        details: [
+          { token: TOKEN, amount: "1", expiration: "1700000000", nonce: 0 },
+          { token: TOKEN_B, amount: MAX_UINT160.toString(), expiration: "1800000000", nonce: 0 },
+        ],
+        spender: SPENDER,
+        sigDeadline: "1700000600",
+      },
+    });
+    expect(p!.grants).toHaveLength(2);
+    expect(p!.grants[0]).toEqual({ token: TOKEN, amountRaw: 1n, unlimited: false, expiration: 1_700_000_000n });
+    expect(p!.grants[1]).toEqual({
+      token: TOKEN_B,
+      amountRaw: MAX_UINT160,
+      unlimited: true,
+      expiration: 1_800_000_000n,
+    });
+    expect(p!.unlimited).toBe(true);
+    expect(p!.incomplete).toBe(false);
+  });
+
+  test("Permit2 PermitBatchTransferFrom: every `permitted` entry is surfaced", () => {
+    const p = detectPermit({
+      domain: { name: "Permit2", chainId: 1 },
+      primaryType: "PermitBatchTransferFrom",
+      message: {
+        permitted: [
+          { token: TOKEN, amount: "5" },
+          { token: SPENDER, amount: "0x10" },
+          { token: RECIPIENT, amount: "7" },
+        ],
+        spender: SPENDER,
+        nonce: 1,
+        deadline: "1700000600",
+      },
+    });
+    expect(p!.grants.map((g) => [g.token, g.amountRaw])).toEqual([
+      [TOKEN, 5n],
+      [SPENDER, 16n],
+      [RECIPIENT, 7n],
+    ]);
+    expect(p!.unlimited).toBe(false);
+    expect(p!.incomplete).toBe(false);
+  });
+
+  test("a batch entry that does not parse marks the permit incomplete", () => {
+    for (const bad of [
+      { token: TOKEN, amount: "0xzz" },
+      { amount: "5" },
+      "junk",
+      null,
+    ]) {
+      const p = detectPermit({
+        primaryType: "PermitBatch",
+        message: { details: [{ token: TOKEN, amount: "1" }, bad], spender: SPENDER },
+      });
+      expect(p!.incomplete).toBe(true);
+    }
+    const empty = detectPermit({ primaryType: "PermitBatch", message: { details: [], spender: SPENDER } });
+    expect(empty!.grants).toEqual([]);
+    expect(empty!.incomplete).toBe(true);
+  });
+
+  test("ERC-2612 permit is a single grant on the verifying contract", () => {
+    const p = detectPermit({
+      domain: { chainId: 1, verifyingContract: TOKEN },
+      primaryType: "Permit",
+      message: { owner: OWNER, spender: SPENDER, value: "250", nonce: 0, deadline: "99" },
+    });
+    expect(p!.grants).toEqual([{ token: TOKEN, amountRaw: 250n, unlimited: false, expiration: null }]);
+    expect(p!.incomplete).toBe(false);
   });
 
   test("non-permit typed data (EIP-712 Mail) is NOT flagged", () => {
@@ -149,9 +248,10 @@ describe("detectPermit", () => {
       message: { spender: SPENDER, value: "0xzz", deadline: {} },
     });
     expect(p).not.toBeNull(); // primaryType says Permit → still warn
-    expect(p!.amountRaw).toBeNull();
+    expect(p!.grants[0].amountRaw).toBeNull();
     expect(p!.deadline).toBeNull();
     expect(p!.chainHex).toBeNull();
+    expect(p!.incomplete).toBe(true); // nothing on screen can be trusted as the full grant
   });
 });
 

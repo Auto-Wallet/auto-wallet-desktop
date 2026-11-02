@@ -81,3 +81,46 @@ test('Relay backend errors remain visible in the quote UI', async () => {
   expect(caught instanceof Error).toBe(true);
   expect((caught as Error).message).toBe('RELAY_API_KEY is not configured');
 });
+
+// Security review addendum #3: a quote fetched for one amount was sent after the
+// user had typed another — prepareSwap took the old quote's tx as-is.
+function depositQuote(stepChainId: number) {
+  mockIPC(() => ({
+    steps: [{
+      id: 'deposit', action: '', description: '', kind: 'transaction', requestId: 'r-1',
+      items: [{ status: 'incomplete', data: {
+        to: '0x3333333333333333333333333333333333333333', data: '0x', value: '10000000000000000', chainId: stepChainId,
+      } }],
+    }],
+    fees: {},
+    details: { currencyOut: { amount: '9000000000000000', amountFormatted: '0.009' } },
+  }));
+  return new RelayProvider().getQuote(params);
+}
+
+test('a Relay quote prepares only for the inputs it was quoted for', async () => {
+  const quote = await depositQuote(8453);
+  const same = await new RelayProvider().prepareSwap({ ...params, fromAmount: '0.010' }, quote);
+  expect(same.swapTx).toEqual({
+    to: '0x3333333333333333333333333333333333333333', data: '0x', value: '10000000000000000', chainId: 8453,
+  });
+
+  for (const changed of [
+    { ...params, fromAmount: '0.001' },
+    { ...params, toChainId: 10 },
+    { ...params, toAddress: '0x4444444444444444444444444444444444444444' },
+    { ...params, slippage: 0.01 },
+    { ...params, fromToken: { ...params.fromToken, address: '0x5555555555555555555555555555555555555555' } },
+  ]) {
+    let caught: unknown;
+    try { await new RelayProvider().prepareSwap(changed, quote); } catch (e) { caught = e; }
+    expect((caught as Error)?.message).toContain('out of date');
+  }
+});
+
+test('a Relay deposit on another chain than the source is refused', async () => {
+  const quote = await depositQuote(1);
+  let caught: unknown;
+  try { await new RelayProvider().prepareSwap(params, quote); } catch (e) { caught = e; }
+  expect((caught as Error)?.message).toContain('chain 1');
+});

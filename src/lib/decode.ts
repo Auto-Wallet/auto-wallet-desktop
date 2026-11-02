@@ -29,17 +29,36 @@ export type TransferDetails = {
   amountRaw: bigint;
 };
 
+/** One token allowance inside a permit. A batch permit carries several. */
+export type PermitGrant = {
+  token: string | null;
+  amountRaw: bigint | null;
+  unlimited: boolean;
+  /** Permit2 per-token `expiration`; null when the permit has none. */
+  expiration: bigint | null;
+};
+
 /** What a permit-style EIP-712 signature would grant, extracted for display. */
 export type PermitInfo = {
   spender: string | null;
-  token: string | null;
-  amountRaw: bigint | null;
+  /** Every allowance the signature grants — ALL of them, never just the first. */
+  grants: PermitGrant[];
+  /** True when any grant failed to decode: the screen may not show everything signed. */
+  incomplete: boolean;
+  /** True when any grant is unlimited. */
   unlimited: boolean;
   deadline: bigint | null;
   chainHex: string | null;
 };
 
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
+const WORD_RE = /^[0-9a-fA-F]{64}$/;
+
+/** An ABI uint256 word, or null if it is not 64 hex digits. dApp calldata is
+ *  untrusted: a bare BigInt() on junk throws and takes the render down. */
+function wordToBigint(word: string): bigint | null {
+  return WORD_RE.test(word) ? BigInt(`0x${word}`) : null;
+}
 
 export function parseApprovalDetails(tx: CalldataCarrier): ApprovalDetails | null {
   if (!tx.to || !tx.data?.startsWith("0x095ea7b3")) return null;
@@ -48,11 +67,12 @@ export function parseApprovalDetails(tx: CalldataCarrier): ApprovalDetails | nul
   const spenderWord = data.slice(8, 72);
   const amountWord = data.slice(72, 136);
   const spender = `0x${spenderWord.slice(24)}`;
-  if (!ADDR_RE.test(spender)) return null;
+  const amountRaw = wordToBigint(amountWord);
+  if (!ADDR_RE.test(spender) || amountRaw === null) return null;
   return {
     tokenAddress: tx.to,
     spender,
-    amountRaw: BigInt(`0x${amountWord}`),
+    amountRaw,
   };
 }
 
@@ -67,14 +87,16 @@ export function parseTransferDetails(tx: CalldataCarrier): TransferDetails | nul
   const addr = (w: string) => `0x${w.slice(24)}`;
   if (selector === "a9059cbb" && data.length >= 8 + 128) {
     const recipient = addr(word(0));
-    if (!ADDR_RE.test(recipient)) return null;
-    return { tokenAddress: tx.to, owner: null, recipient, amountRaw: BigInt(`0x${word(1)}`) };
+    const amountRaw = wordToBigint(word(1));
+    if (!ADDR_RE.test(recipient) || amountRaw === null) return null;
+    return { tokenAddress: tx.to, owner: null, recipient, amountRaw };
   }
   if (selector === "23b872dd" && data.length >= 8 + 192) {
     const owner = addr(word(0));
     const recipient = addr(word(1));
-    if (!ADDR_RE.test(owner) || !ADDR_RE.test(recipient)) return null;
-    return { tokenAddress: tx.to, owner, recipient, amountRaw: BigInt(`0x${word(2)}`) };
+    const amountRaw = wordToBigint(word(2));
+    if (!ADDR_RE.test(owner) || !ADDR_RE.test(recipient) || amountRaw === null) return null;
+    return { tokenAddress: tx.to, owner, recipient, amountRaw };
   }
   return null;
 }
@@ -103,6 +125,13 @@ export function asBigint(v: unknown): bigint | null {
   return null;
 }
 
+/** A 0x-hex quantity such as a tx `value`. "0x" counts as zero; anything else
+ *  that is not hex is null — the caller shows the raw text, never a guess. */
+export function parseHexQuantity(v: string): bigint | null {
+  if (!/^0x[0-9a-fA-F]*$/.test(v)) return null;
+  return v === "0x" ? 0n : BigInt(v);
+}
+
 export function chainIdToHex(v: unknown): string | null {
   const n = asBigint(v);
   return n !== null && n > 0n ? `0x${n.toString(16)}` : null;
@@ -116,33 +145,60 @@ export function detectPermit(data: TypedDataPayload): PermitInfo | null {
   if (!msg || typeof msg !== "object" || Array.isArray(msg)) return null;
   const m = msg as Record<string, unknown>;
   const domain = (data.domain ?? {}) as Record<string, unknown>;
-  // Permit2 nests token+amount: PermitSingle/PermitBatch under `details`,
-  // PermitTransferFrom under `permitted` (arrays for the batch variants).
-  const nestedRaw = m.details ?? m.permitted;
-  const nested = Array.isArray(nestedRaw) ? nestedRaw[0] : nestedRaw;
-  const inner =
-    nested && typeof nested === "object" ? (nested as Record<string, unknown>) : undefined;
+  const fallbackToken =
+    typeof domain.verifyingContract === "string" ? domain.verifyingContract : null;
   const spender = typeof m.spender === "string" ? m.spender : null;
   const daiAllowed = m.allowed === true || m.allowed === "true";
-  const amountRaw = daiAllowed
-    ? null
-    : asBigint(m.value ?? m.amount ?? m.wad ?? inner?.amount ?? inner?.value);
+  // Permit2 nests token+amount: PermitSingle/PermitBatch under `details`,
+  // PermitTransferFrom under `permitted` — arrays for the batch variants, and
+  // every entry is a separate allowance the user must see.
+  const nestedRaw = m.details ?? m.permitted;
+  const nestedList = nestedRaw === undefined ? null : Array.isArray(nestedRaw) ? nestedRaw : [nestedRaw];
+  const grants: PermitGrant[] = nestedList
+    ? nestedList.map((entry) => {
+        const inner =
+          entry && typeof entry === "object" && !Array.isArray(entry)
+            ? (entry as Record<string, unknown>)
+            : {};
+        const amountRaw = asBigint(inner.amount ?? inner.value);
+        return {
+          token: typeof inner.token === "string" ? inner.token : null,
+          amountRaw,
+          unlimited: isUnlimitedAmount(amountRaw),
+          expiration: asBigint(inner.expiration),
+        };
+      })
+    : [
+        // ERC-2612 / DAI: one allowance on the token the domain names.
+        (() => {
+          const amountRaw = daiAllowed ? null : asBigint(m.value ?? m.amount ?? m.wad);
+          return {
+            token: typeof m.token === "string" ? m.token : fallbackToken,
+            amountRaw,
+            unlimited: daiAllowed || isUnlimitedAmount(amountRaw),
+            expiration: null,
+          };
+        })(),
+      ];
+  const anyAmount = grants.some((g) => g.amountRaw !== null);
   const primary = String(data.primaryType ?? "");
-  if (!/permit/i.test(primary) && !(spender && (amountRaw !== null || daiAllowed))) return null;
-  const tokenField = inner?.token ?? m.token;
-  const token =
-    typeof tokenField === "string"
-      ? tokenField
-      : typeof domain.verifyingContract === "string"
-        ? domain.verifyingContract
-        : null;
-  const deadline = asBigint(m.deadline ?? m.sigDeadline ?? m.expiry ?? inner?.expiration);
-  const unlimited =
-    daiAllowed ||
-    amountRaw === MAX_UINT256 ||
-    amountRaw === MAX_UINT160 ||
-    amountRaw === MAX_UINT96;
-  return { spender, token, amountRaw, unlimited, deadline, chainHex: chainIdToHex(domain.chainId) };
+  if (!/permit/i.test(primary) && !(spender && (anyAmount || daiAllowed))) return null;
+  const incomplete =
+    grants.length === 0 ||
+    grants.some((g) => g.token === null || (g.amountRaw === null && !g.unlimited));
+  const deadline = asBigint(m.deadline ?? m.sigDeadline ?? m.expiry);
+  return {
+    spender,
+    grants,
+    incomplete,
+    unlimited: grants.some((g) => g.unlimited),
+    deadline,
+    chainHex: chainIdToHex(domain.chainId),
+  };
+}
+
+function isUnlimitedAmount(amountRaw: bigint | null): boolean {
+  return amountRaw === MAX_UINT256 || amountRaw === MAX_UINT160 || amountRaw === MAX_UINT96;
 }
 
 /**

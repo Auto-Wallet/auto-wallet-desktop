@@ -23,6 +23,7 @@ import {
   type ProviderChain,
   type ProviderToken,
   type QuoteParams,
+  sameQuoteInputs,
   type StatusArgs,
   type SwapProvider,
 } from './types';
@@ -213,6 +214,11 @@ export class RelayProvider implements SwapProvider {
   }
 
   async prepareSwap(params: QuoteParams, quote: NeutralQuote): Promise<PreparedSwap> {
+    // The cached tx below was priced for quote.quotedFor. Sending it for any
+    // other inputs would sign a different trade than the screen shows.
+    if (!sameQuoteInputs(quote.quotedFor, params)) {
+      throw new Error('Relay quote is out of date for the current inputs — wait for the new quote');
+    }
     // The opaque payload is the full quote response (cached during getQuote).
     // Pull the deposit step (the actual cross-chain send).
     const raw = quote.raw as RelayQuoteResponse;
@@ -220,6 +226,11 @@ export class RelayProvider implements SwapProvider {
     if (!depositStep) throw new Error('Relay quote returned no deposit step');
     const item = depositStep.items.find((i) => i.status === 'incomplete') ?? depositStep.items[0];
     if (!item?.data?.to) throw new Error('Relay deposit step missing tx data');
+    if (item.data.chainId !== undefined && item.data.chainId !== params.fromChainId) {
+      throw new Error(
+        `Relay deposit is on chain ${item.data.chainId}, not the source chain ${params.fromChainId}`,
+      );
+    }
     return {
       providerId: this.id,
       swapTx: {
@@ -334,6 +345,7 @@ function toNeutralQuote(q: RelayQuoteResponse, params: QuoteParams): NeutralQuot
     amountOutUsd,
     netValueUsd,
     raw: q,
+    quotedFor: params,
   };
 }
 

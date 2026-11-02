@@ -144,13 +144,24 @@ fn encode_field(field_type: &str, value: &Value, types: &Value) -> Result<[u8; 3
             o[12..].copy_from_slice(&addr);
             Ok(o)
         }
-        t if t.starts_with("uint") => parse_uint256(value),
-        t if t.starts_with("int") => parse_int256(value),
+        t if t.starts_with("uint") => {
+            check_int_width(t, &t[4..])?;
+            parse_uint256(value)
+        }
+        t if t.starts_with("int") => {
+            check_int_width(t, &t[3..])?;
+            parse_int256(value)
+        }
         t if t.starts_with("bytes") => {
-            // bytesN — left-aligned (the value is exactly N bytes).
+            // bytesN — left-aligned (the value is exactly N bytes). EIP-712
+            // allows bytes1..bytes32 only; anything wider would overrun the
+            // 32-byte word below.
             let n: usize = t[5..]
                 .parse()
                 .map_err(|_| format!("bad fixed-bytes type {t}"))?;
+            if !(1..=32).contains(&n) {
+                return Err(format!("bad fixed-bytes type {t}: size must be 1..=32"));
+            }
             let b = parse_hex(value)?;
             if b.len() != n {
                 return Err(format!("{t} expects {n} bytes, got {}", b.len()));
@@ -160,6 +171,18 @@ fn encode_field(field_type: &str, value: &Value, types: &Value) -> Result<[u8; 3
             Ok(o)
         }
         other => Err(format!("unsupported EIP-712 type {other}")),
+    }
+}
+
+/// `uintN` / `intN`: N is 8..=256 in steps of 8. Bare `uint`/`int` is the
+/// Solidity alias for 256.
+fn check_int_width(ty: &str, suffix: &str) -> Result<(), String> {
+    if suffix.is_empty() {
+        return Ok(());
+    }
+    match suffix.parse::<u16>() {
+        Ok(n) if n % 8 == 0 && (8..=256).contains(&n) => Ok(()),
+        _ => Err(format!("bad integer type {ty}: width must be 8..=256 in steps of 8")),
     }
 }
 
@@ -388,5 +411,58 @@ mod tests {
             hex::encode(big),
             "00000000000000000000000000000000000000000000003635c9adc5dea00000"
         );
+    }
+
+    /// Typed data with one field of `ty` holding `value`.
+    fn one_field(ty: &str, value: Value) -> Value {
+        json!({
+            "types": {
+                "EIP712Domain": [{"name": "name", "type": "string"}],
+                "Probe": [{"name": "v", "type": ty}]
+            },
+            "primaryType": "Probe",
+            "domain": {"name": "probe"},
+            "message": {"v": value}
+        })
+    }
+
+    // Security review 2026-11-02 #6: bytes33 with 33 bytes passed the length
+    // check, then sliced past the 32-byte word and panicked.
+    #[test]
+    fn fixed_bytes_outside_1_to_32_is_an_error_not_a_panic() {
+        for (ty, len) in [("bytes33", 33), ("bytes64", 64), ("bytes0", 0)] {
+            let value = json!(format!("0x{}", "ab".repeat(len)));
+            let out = std::panic::catch_unwind(|| signing_hash(&one_field(ty, value)));
+            let res = out.unwrap_or_else(|_| panic!("{ty} panicked"));
+            let err = res.expect_err(&format!("{ty} must be refused"));
+            assert!(err.contains(ty), "error should name {ty}: {err}");
+        }
+    }
+
+    #[test]
+    fn fixed_bytes_edges_still_encode() {
+        let one = signing_hash(&one_field("bytes1", json!("0xab"))).unwrap();
+        let full = signing_hash(&one_field("bytes32", json!(format!("0x{}", "cd".repeat(32))))).unwrap();
+        assert_ne!(one, full);
+        // Left-aligned: bytes1 0xab encodes as ab00…00.
+        assert_eq!(
+            encode_field("bytes1", &json!("0xab"), &json!({})).unwrap(),
+            {
+                let mut w = [0u8; 32];
+                w[0] = 0xab;
+                w
+            }
+        );
+    }
+
+    #[test]
+    fn integer_widths_must_be_multiples_of_8_up_to_256() {
+        for ty in ["uint7", "uint0", "uint264", "int12", "uintx"] {
+            let err = signing_hash(&one_field(ty, json!("1"))).expect_err(ty);
+            assert!(err.contains(ty), "error should name {ty}: {err}");
+        }
+        for ty in ["uint8", "uint256", "int8", "int256", "uint", "int"] {
+            signing_hash(&one_field(ty, json!("1"))).unwrap_or_else(|e| panic!("{ty}: {e}"));
+        }
     }
 }

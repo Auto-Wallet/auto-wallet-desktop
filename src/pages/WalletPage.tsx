@@ -84,6 +84,7 @@ import {
   pickBestSlot,
   PROVIDERS,
   NATIVE_TOKEN_ADDRESS,
+  sameQuoteInputs,
   type MergedChain,
   type MergedToken,
   type NeutralStatus,
@@ -4638,6 +4639,24 @@ function CrossChainModal({
       return null;
     }
   }, [amount, sourceToken]);
+  // The inputs on screen right now. A quote fetched for earlier inputs stays
+  // visible for the 450ms debounce, but it must not be sendable: Swap is live
+  // only while the selected quote was priced for exactly these inputs.
+  const currentQuoteParams: QuoteParams | null =
+    sourceToken && targetToken && sourceChainNum && targetChainId
+      ? {
+          fromChainId: sourceChainNum,
+          toChainId: targetChainId,
+          fromToken: sourceToken,
+          toToken: targetToken,
+          fromAddress: activeAddress,
+          toAddress: activeAddress,
+          fromAmount: amount.trim(),
+          slippage,
+        }
+      : null;
+  const quoteIsCurrent =
+    !!selectedQuote && !!currentQuoteParams && sameQuoteInputs(selectedQuote.quotedFor, currentQuoteParams);
   const insufficient =
     !!asset && !!amountRaw && amountRaw > 0n && amountRaw > BigInt(asset.wei);
   const approveKey =
@@ -4754,6 +4773,8 @@ function CrossChainModal({
 
   async function approve() {
     if (!asset || !selectedQuote?.approvalSpender || !sourceToken) return;
+    // The spender comes from the quote: use it only for the inputs it was quoted for.
+    if (!quoteIsCurrent) return;
     if (!amountRaw || amountRaw <= 0n) {
       setStage({ kind: "error", message: t("wallet.invalidAmount") });
       return;
@@ -4793,18 +4814,12 @@ function CrossChainModal({
     if (!asset || !sourceToken || !targetToken || !sourceChainNum || !targetChainId || !selectedQuote || !selectedProvider) return;
     if (!amountRaw || amountRaw <= 0n) return setStage({ kind: "error", message: t("wallet.invalidAmount") });
     if (insufficient) return setStage({ kind: "error", message: t("wallet.insufficient") });
+    // The button is already off for a stale quote; this guards the click that
+    // lands in the same frame as the edit.
+    if (!currentQuoteParams || !quoteIsCurrent) return;
     setStage({ kind: "swapping" });
     setSwapStatus(null);
-    const params: QuoteParams = {
-      fromChainId: sourceChainNum,
-      toChainId: targetChainId,
-      fromToken: sourceToken,
-      toToken: targetToken,
-      fromAddress: activeAddress,
-      toAddress: activeAddress,
-      fromAmount: amount.trim(),
-      slippage,
-    };
+    const params = currentQuoteParams;
     try {
       const provider = getProvider(selectedProvider);
       const prepared = await provider.prepareSwap(params, selectedQuote);
@@ -4996,13 +5011,13 @@ function CrossChainModal({
               {t("wallet.cancel")}
             </button>
             {needsApprove ? (
-              <button className="btn btn-aurora swap-footer-btn primary" disabled={stage.kind === "approving"} onClick={() => void approve()}>
+              <button className="btn btn-aurora swap-footer-btn primary" disabled={!quoteIsCurrent || stage.kind === "approving"} onClick={() => void approve()}>
                 {stage.kind === "approving" ? t("wallet.approving") : t("wallet.approveToken", { symbol: sourceToken?.symbol ?? "" })}
               </button>
             ) : (
               <button
                 className="btn btn-aurora swap-footer-btn primary"
-                disabled={!selectedQuote || anyQuoteLoading || insufficient || stage.kind === "swapping"}
+                disabled={!quoteIsCurrent || anyQuoteLoading || insufficient || stage.kind === "swapping"}
                 onClick={() => void swap()}
               >
                 {stage.kind === "swapping"

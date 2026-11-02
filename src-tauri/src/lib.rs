@@ -2029,6 +2029,15 @@ struct PendingEntry {
     responder: tokio::sync::oneshot::Sender<ApprovalDecision>,
 }
 
+/// Open approvals one origin may have at once. A page asking for more is
+/// refused with -32002 (EIP-1193 "request already pending") instead of
+/// stacking prompts the user has to dig through.
+const MAX_PENDING_PER_ORIGIN: usize = 3;
+
+fn over_pending_cap(queue: &HashMap<String, PendingEntry>, origin: &str) -> bool {
+    queue.values().filter(|e| e.req.origin == origin).count() >= MAX_PENDING_PER_ORIGIN
+}
+
 fn pending() -> &'static Mutex<HashMap<String, PendingEntry>> {
     static PENDING: OnceLock<Mutex<HashMap<String, PendingEntry>>> = OnceLock::new();
     PENDING.get_or_init(|| Mutex::new(HashMap::new()))
@@ -2092,10 +2101,18 @@ async fn request_approval<R: Runtime>(
     // Snapshot before registering, so a beat from a window already showing an
     // EARLIER request cannot be mistaken for one that has picked this one up.
     let baseline = approval_ui_beat();
-    pending()
-        .lock()
-        .unwrap()
-        .insert(id.clone(), PendingEntry { req, responder: tx });
+    {
+        // Check and insert under one lock, so two racing requests can't both
+        // slip under the cap.
+        let mut queue = pending().lock().unwrap();
+        if over_pending_cap(&queue, &req.origin) {
+            return Err(format!(
+                "{} already has {MAX_PENDING_PER_ORIGIN} requests waiting for approval (-32002)",
+                req.origin
+            ));
+        }
+        queue.insert(id.clone(), PendingEntry { req, responder: tx });
+    }
 
     emit_request_phase(app, Some(&id), "awaiting-window");
     if let Err(e) = open_approval_window(app) {
@@ -2230,9 +2247,26 @@ fn resolve_request<R: Runtime>(
         .unwrap()
         .remove(id)
         .ok_or_else(|| format!("no pending request {id}"))?;
+    // Only the approval window's approve/reject reach here: a click by the user.
+    note_activity();
     let _ = entry.responder.send(decision); // receiver may have timed out; ignore
     close_approval_window_if_idle(app);
     Ok(())
+}
+
+/// Answer every open approval with a rejection (the dApp sees 4001) and take the
+/// window down. Used when the wallet locks: a request left open after the keys
+/// are gone could only fail later, at the moment the user clicks Approve.
+fn reject_all_pending<R: Runtime>(app: &AppHandle<R>) {
+    let drained: Vec<PendingEntry> = pending().lock().unwrap().drain().map(|(_, e)| e).collect();
+    if drained.is_empty() {
+        return;
+    }
+    log_diagnostic(app, format!("rejecting {} open approval(s) on lock", drained.len()));
+    for entry in drained {
+        let _ = entry.responder.send(ApprovalDecision::default()); // = rejected
+    }
+    close_approval_window_if_idle(app);
 }
 
 /// Tell the shell how far a request has got, so the UI can say what it is waiting
@@ -2472,6 +2506,65 @@ fn tx_field<'a>(tx: &'a Value, key: &str) -> Option<&'a str> {
     tx.get(key).and_then(|v| v.as_str())
 }
 
+/// The dApp's quantity fields, which the approval window parses with BigInt().
+const DAPP_TX_QUANTITIES: [&str; 6] = [
+    "value",
+    "nonce",
+    "gas",
+    "maxFeePerGas",
+    "maxPriorityFeePerGas",
+    "gasPrice",
+];
+
+/// Check the dApp's transaction before anything uses it, and hand back a copy in
+/// one canonical shape. Quantities must be 0x-hex ("0x" alone is zero and comes
+/// back as "0x0"); `data` must be 0x + whole bytes; `to` empty or 20 bytes.
+/// Without this, junk reached the approval window, where BigInt() threw and
+/// blanked it — and an unprefixed "1000" was read as hex by the signer but as
+/// decimal by the window (security review 2026-11-02 #5).
+fn normalize_dapp_tx(tx: &Value) -> Result<Value, String> {
+    let mut out = tx.clone();
+    for key in DAPP_TX_QUANTITIES {
+        let Some(raw) = tx_field(tx, key) else { continue };
+        let digits = raw
+            .strip_prefix("0x")
+            .ok_or_else(|| format!("transaction '{key}' must be 0x-hex, got {raw:?}"))?;
+        if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!("transaction '{key}' must be 0x-hex, got {raw:?}"));
+        }
+        // "0x" is zero for value and fees, but a gas limit or nonce of "0x"
+        // is a malformed field, not a choice.
+        if digits.is_empty() && matches!(key, "nonce" | "gas") {
+            return Err(format!("transaction '{key}' is empty"));
+        }
+        if digits.is_empty() {
+            out[key] = json!("0x0");
+        }
+    }
+    for key in ["data", "input"] {
+        let Some(raw) = tx_field(tx, key) else { continue };
+        let ok = raw.strip_prefix("0x").is_some_and(|d| {
+            d.len() % 2 == 0 && d.bytes().all(|b| b.is_ascii_hexdigit())
+        });
+        if !ok {
+            return Err(format!(
+                "transaction '{key}' must be 0x-hex whole bytes, got {} chars",
+                raw.len()
+            ));
+        }
+    }
+    if let Some(to) = tx_field(tx, "to") {
+        let ok = to.is_empty()
+            || to.len() == 42
+                && to.starts_with("0x")
+                && to[2..].bytes().all(|b| b.is_ascii_hexdigit());
+        if !ok {
+            return Err(format!("transaction 'to' is not an address: {to:?}"));
+        }
+    }
+    Ok(out)
+}
+
 /// Parse a 0x-hex quantity to u128 (used only for the fee arithmetic + summary).
 fn hex_to_u128(hex: &str) -> Result<u128, String> {
     let s = hex.strip_prefix("0x").unwrap_or(hex);
@@ -2589,6 +2682,7 @@ async fn prepare_tx_within(
 }
 
 async fn prepare_tx_on(chain: &ChainCfg, tx: &Value) -> Result<PreparedTx, String> {
+    let tx = &normalize_dapp_tx(tx)?;
     let chain = chain.clone();
     let from = active_account_address().ok_or("wallet is locked")?;
     if let Some(req_from) = tx_field(tx, "from") {
@@ -3155,7 +3249,10 @@ async fn wallet_request<R: tauri::Runtime>(
     method: String,
     params: Option<Vec<Value>>,
 ) -> Result<Value, String> {
-    note_activity(); // a dApp in use keeps the wallet unlocked
+    // No note_activity() here: a page polls on its own (eth_chainId,
+    // eth_blockNumber…), so dApp traffic says nothing about whether the user is
+    // there. Counting it kept the wallet unlocked for as long as any dApp was
+    // open (security review 2026-11-02 #3).
     let origin = match webview.url() {
         Ok(url) => url.origin().ascii_serialization(),
         // No page URL yet — fall back to the (still engine-set) webview label,
@@ -4656,12 +4753,10 @@ fn auto_lock_due(now_ms: u64, last_ms: u64, minutes: u32, lockable: bool) -> boo
         && now_ms - last_ms >= u64::from(minutes) * 60_000
 }
 
-/// One check of the idle timer at `now_ms`. An open approval counts as activity:
-/// the user is looking at it, and locking would fail the request they are reading.
+/// One check of the idle timer at `now_ms`. An open approval does NOT hold the
+/// lock off: a page could keep one open on purpose. A user reading it moves the
+/// mouse or presses keys in the approval window, which reports that as activity.
 fn auto_lock_tick_at<R: Runtime>(app: &AppHandle<R>, minutes: u32, now_ms: u64) {
-    if !pending().lock().unwrap().is_empty() {
-        return;
-    }
     let lockable = store_state()
         .lock()
         .unwrap()
@@ -4669,6 +4764,7 @@ fn auto_lock_tick_at<R: Runtime>(app: &AppHandle<R>, minutes: u32, now_ms: u64) 
         .is_some_and(|s| s.password.is_some());
     if auto_lock_due(now_ms, last_activity_ms(), minutes, lockable) {
         log_diagnostic(app, format!("auto-lock after {minutes} idle minutes"));
+        reject_all_pending(app);
         lock_vault(app.clone());
         let _ = app.emit("vault-locked", ());
     }
@@ -10852,6 +10948,82 @@ mod e2e {
         );
     }
 
+    /// A dApp tx with every field supplied: preparing it needs no node at all.
+    fn fully_specified_tx() -> Value {
+        json!({
+            "from": SPIKE_ACCOUNT,
+            "to": SPIKE_ACCOUNT,
+            "value": "0x1",
+            "data": "0x095ea7b3",
+            "nonce": "0x7",
+            "gas": "0x5208",
+            "maxFeePerGas": "0x3b9aca00",
+            "maxPriorityFeePerGas": "0x1",
+        })
+    }
+
+    /// Security review 2026-11-02 #5: dApp-supplied fields reached the approval
+    /// window unchecked, where BigInt() on junk blanked the whole window. Junk
+    /// must be refused before any window opens, naming the bad field.
+    #[test]
+    fn preparing_rejects_malformed_dapp_fields() {
+        let _guard = wallet_guard();
+        let chain = super::tests::stalled_node_chain();
+        let ok = tauri::async_runtime::block_on(prepare_tx_within(
+            &chain,
+            &fully_specified_tx(),
+            Duration::from_millis(600),
+        ));
+        assert!(ok.is_ok(), "a well-formed tx must prepare offline: {:?}", ok.err());
+
+        for (field, junk) in [
+            ("data", json!(format!("0x095ea7b3{}", "z".repeat(64)))),
+            ("data", json!("0x123")), // odd length: not whole bytes
+            ("data", json!("095ea7b3")), // no 0x prefix
+            ("value", json!("0xzz")),
+            // Decimal without 0x: the signer read it as hex while the window
+            // showed it as decimal — two different amounts.
+            ("value", json!("1000")),
+            ("nonce", json!("seven")),
+            ("gas", json!("0x")),
+            ("maxFeePerGas", json!("0x1g")),
+            ("maxPriorityFeePerGas", json!("-1")),
+            ("to", json!("0x1234")),
+        ] {
+            let mut tx = fully_specified_tx();
+            tx[field] = junk.clone();
+            let err = tauri::async_runtime::block_on(prepare_tx_within(
+                &chain,
+                &tx,
+                Duration::from_millis(600),
+            ))
+            .err()
+            .unwrap_or_else(|| panic!("{field} = {junk} must be refused"));
+            assert!(err.contains(field), "error for {field} = {junk} must name it: {err}");
+        }
+    }
+
+    /// "0x" is how some libraries write zero. It reaches the window as "0x0",
+    /// which every parser on both sides reads the same way.
+    #[test]
+    fn preparing_normalizes_empty_quantities_to_zero() {
+        let _guard = wallet_guard();
+        let chain = super::tests::stalled_node_chain();
+        let mut tx = fully_specified_tx();
+        tx["value"] = json!("0x");
+        tx["maxPriorityFeePerGas"] = json!("0x");
+        let prepared = tauri::async_runtime::block_on(prepare_tx_within(
+            &chain,
+            &tx,
+            Duration::from_millis(600),
+        ))
+        .expect("prepares");
+        assert_eq!(prepared.value, "0x0");
+        assert_eq!(prepared.max_priority_fee_per_gas, "0x0");
+        assert_eq!(prepared.data, "0x095ea7b3");
+        assert_eq!(prepared.nonce, "0x7");
+    }
+
     /// The whole pre-approval preparation is bounded, so the Send button can never
     /// sit on "confirm in window" with no window. This lives in `e2e` because it
     /// needs an UNLOCKED vault: with a locked one `prepare_tx` returns "wallet is
@@ -11916,8 +12088,10 @@ mod e2e {
         assert!(!auto_lock_due(1 * min, 6 * min, 15, true));
     }
 
-    /// The idle timer drops the keys, but never under an open approval (the user
-    /// is looking at it), and dApp traffic counts as activity.
+    /// The idle timer drops the keys. dApp traffic is NOT user activity: pages
+    /// poll eth_chainId / eth_blockNumber on their own, so counting them kept
+    /// any open dApp from ever letting the wallet lock (security review
+    /// 2026-11-02 #3).
     #[test]
     fn e2e_auto_lock_drops_keys_after_idle() {
         let _guard = wallet_guard();
@@ -11932,28 +12106,23 @@ mod e2e {
         auto_lock_tick_at(app.handle(), 15, 20 * min);
         assert!(active_account_address().is_some(), "not idle long enough yet");
 
-        // A dApp call is activity: it resets the timer.
+        // A page polling on its own does not restart the timer.
         call(&wv, "eth_chainId", json!([])).unwrap();
-        assert!(last_activity_ms() > 20 * min);
+        call(&wv, "eth_blockNumber", json!([])).ok();
+        assert_eq!(last_activity_ms(), 10 * min, "dApp calls must not count as activity");
 
-        note_activity_at(10 * min);
         auto_lock_tick_at(app.handle(), 15, 30 * min);
         assert!(active_account_address().is_none(), "idle 20 min > 15 min: locked");
         assert_eq!(call(&wv, "eth_accounts", json!([])).unwrap(), json!([]));
     }
 
-    #[test]
-    fn e2e_auto_lock_waits_while_an_approval_is_open() {
-        let _guard = wallet_guard();
-        let app = build_app();
-        store_state().lock().unwrap().as_mut().unwrap().password =
-            Some(Zeroizing::new("hunter22".to_string()));
-        let (tx, _rx) = tokio::sync::oneshot::channel();
+    fn open_test_approval(id: &str) -> tokio::sync::oneshot::Receiver<ApprovalDecision> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
         pending().lock().unwrap().insert(
-            "req-open".into(),
+            id.into(),
             PendingEntry {
                 req: PendingRequest {
-                    id: "req-open".into(),
+                    id: id.into(),
                     method: "personal_sign".into(),
                     origin: "https://metamask.github.io".into(),
                     signer_address: None,
@@ -11965,10 +12134,74 @@ mod e2e {
                 responder: tx,
             },
         );
+        rx
+    }
+
+    /// An open approval no longer holds the lock off forever — a page could keep
+    /// one open on purpose. Idle means idle: lock, and answer every open request
+    /// with a rejection so no window is left asking for a signature it can't make.
+    #[test]
+    fn e2e_auto_lock_rejects_open_approvals_when_idle() {
+        let _guard = wallet_guard();
+        let app = build_app();
+        store_state().lock().unwrap().as_mut().unwrap().password =
+            Some(Zeroizing::new("hunter22".to_string()));
+        let mut first = open_test_approval("req-open-1");
+        let mut second = open_test_approval("req-open-2");
         note_activity_at(0);
         auto_lock_tick_at(app.handle(), 15, 600 * 60_000);
-        assert!(active_account_address().is_some());
+        assert!(active_account_address().is_none(), "idle with approvals open: still locks");
+        assert!(pending().lock().unwrap().is_empty(), "open approvals are cleared");
+        for rx in [&mut first, &mut second] {
+            let decision = rx.try_recv().expect("each open request gets an answer");
+            assert!(!decision.approved, "an idle lock rejects, never approves");
+        }
+    }
+
+    /// One page cannot stack up an unbounded queue of prompts: past the cap, a
+    /// new request is refused at once instead of opening yet another one.
+    #[test]
+    fn e2e_pending_requests_are_capped_per_origin() {
+        let _guard = wallet_guard();
+        let app = build_app();
+        let origin = "https://metamask.github.io";
+        let mut held = Vec::new();
+        for i in 0..MAX_PENDING_PER_ORIGIN {
+            held.push(open_test_approval(&format!("req-cap-{i}")));
+        }
+        let req = |id: &str, origin: &str| PendingRequest {
+            id: id.into(),
+            method: "personal_sign".into(),
+            origin: origin.into(),
+            signer_address: None,
+            signer_kind: None,
+            summary: String::new(),
+            tx: None,
+            typed_data: None,
+        };
+        let err = tauri::async_runtime::block_on(request_approval(app.handle(), req("req-cap-over", origin)))
+            .err()
+            .expect("over the cap: refused");
+        assert!(err.contains("-32002"), "names the EIP-1193 busy code: {err}");
+        assert_eq!(
+            pending().lock().unwrap().len(),
+            MAX_PENDING_PER_ORIGIN,
+            "the refused request was never queued"
+        );
+        // Another origin is not affected by this one's queue.
+        assert!(!over_pending_cap(&pending().lock().unwrap(), "https://other.example"));
         pending().lock().unwrap().clear();
+    }
+
+    /// The user deciding in the approval window is activity.
+    #[test]
+    fn e2e_approval_decisions_count_as_activity() {
+        let _guard = wallet_guard();
+        let app = build_app();
+        let _rx = open_test_approval("req-decide");
+        note_activity_at(0);
+        reject_request(app.handle().clone(), "req-decide".into()).unwrap();
+        assert!(last_activity_ms() > 0, "rejecting must restart the idle timer");
     }
 
     /// Locking tells connected tabs their account is gone; unconnected tabs are

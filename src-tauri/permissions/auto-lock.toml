@@ -1,7 +1,9 @@
-# Auto-lock settings and the shell's activity heartbeat. Shell-only.
+# Auto-lock settings and the activity heartbeat. The heartbeat is granted to the
+# trusted local windows (shell, approval) only — NEVER to dapp: a page reporting
+# its own "activity" would keep the wallet unlocked forever.
 [[permission]]
 identifier = "allow-note-user-activity"
-description = "Allow the shell to report user input so the idle auto-lock timer restarts."
+description = "Allow a trusted local window to report user input so the idle auto-lock timer restarts."
 commands.allow = ["note_user_activity"]
 
 [[permission]]
