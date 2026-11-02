@@ -30,8 +30,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "license": "MIT",
-    "licenseFile": "../LICENSE",
     "publisher": "Auto Wallet",
     "copyright": "Copyright (c) 2026 Auto Wallet",
     "createUpdaterArtifacts": true,
