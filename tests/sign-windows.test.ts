@@ -15,6 +15,7 @@ import {
   shouldAuthenticodeSign,
   signerSubjectError,
   signingContextError,
+  subjectFromCredentialInfo,
   updaterSignatureError,
 } from "../scripts/sign-windows.ts";
 
@@ -264,4 +265,74 @@ test.skipIf(process.platform !== "win32")("--verify rejects an unsigned exe", ()
   expect(result.stdout).toMatch(/STATUS=(NotSigned|UnknownError)/);
   expect(result.stderr).toContain("Authenticode verification failed");
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// --- Tauri signCommand config -------------------------------------------------
+// v0.2.87's first Windows run died with "os error 193": PowerShell resolved
+// `bun` to npm's bun.ps1 shim, which CreateProcess cannot start. The config is
+// now written by bun itself, so `cmd` is the bun binary that is running.
+
+test("--write-tauri-config points signCommand at a bun binary that CreateProcess can start", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sign-config-"));
+  const out = path.join(dir, "windows-sign.json");
+  const written = runSigner(["--write-tauri-config", out], {});
+  expect(written.status).toBe(0);
+
+  const signCommand = JSON.parse(fs.readFileSync(out, "utf8")).bundle.windows.signCommand;
+  expect(signCommand.cmd).toBe(fs.realpathSync(process.execPath));
+  expect(path.isAbsolute(signCommand.cmd)).toBe(true);
+  if (process.platform === "win32") expect(signCommand.cmd.toLowerCase().endsWith(".exe")).toBe(true);
+  expect(signCommand.args).toEqual([path.join(ROOT, "scripts", "sign-windows.ts"), "%1"]);
+
+  // Start it the way Tauri does: the program itself, no shell, from another cwd.
+  const launched = spawnSync(signCommand.cmd, [signCommand.args[0], "C:\\nsis\\NSISdl.dll"], {
+    cwd: dir,
+    encoding: "utf8",
+    shell: false,
+    env: { ...process.env, GITHUB_ACTIONS: "true", GITHUB_EVENT_NAME: "workflow_dispatch" },
+  });
+  expect(launched.error).toBeUndefined();
+  expect(launched.status).toBe(0);
+  expect(launched.stdout).toContain("skip");
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("release-windows.yml builds with the config bun writes, not a PowerShell-resolved path", () => {
+  const { parsed } = readWorkflow("release-windows.yml");
+  const runs = (parsed.jobs.build.steps as any[]).map((step) => String(step.run ?? "")).join("\n");
+  expect(runs).toContain("scripts/sign-windows.ts --write-tauri-config");
+  expect(runs).not.toContain("Get-Command bun");
+});
+
+// --- certificate check before any signing -------------------------------------
+
+test("the certificate subject is read from CodeSignTool credential_info output", () => {
+  const output = [
+    "Command: credential_info",
+    "Certificate Subject Information: ",
+    "- Subject DN: CN=Lin Mo, O=Lin Mo, L=Shanghai, C=CN",
+    "- Issuer DN: CN=SSL.com Code Signing Intermediate CA RSA R1, O=SSL Corp, C=US",
+    "- Certificate Expiry: 2027-11-01",
+    "credential_info command executed successfully",
+  ].join("\r\n");
+  expect(subjectFromCredentialInfo(output)).toBe("CN=Lin Mo, O=Lin Mo, L=Shanghai, C=CN");
+  expect(signerSubjectError(subjectFromCredentialInfo(output))).toBeNull();
+
+  expect(subjectFromCredentialInfo("Subject DN: CN=Other, C=US\nIssuer DN: CN=Lin Mo")).toBe("CN=Other, C=US");
+  expect(() => subjectFromCredentialInfo("Error: invalid credentials")).toThrow("no Subject DN");
+});
+
+test("the workflow checks the certificate before tauri build spends a signing", () => {
+  const { parsed } = readWorkflow("release-windows.yml");
+  const steps = parsed.jobs.build.steps as any[];
+  const check = steps.findIndex((step) => String(step.run ?? "").includes("--check-credential"));
+  const build = steps.findIndex((step) => String(step.run ?? "").includes("tauri build"));
+  expect(check).toBeGreaterThanOrEqual(0);
+  expect(check).toBeLessThan(build);
+});
+
+test("--check-credential refuses to run without the secrets it needs", () => {
+  const result = runSigner(["--check-credential"], { ...FULL_SECRETS, ES_USERNAME: "", CREDENTIAL_ID: "" });
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("missing ES_USERNAME, CREDENTIAL_ID");
 });

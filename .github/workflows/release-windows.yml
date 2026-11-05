@@ -153,43 +153,28 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "ESIGNER_SIGN_LOG=$env:RUNNER_TEMP\esigner-signed.txt"
           Write-Host "CodeSignTool $version ready (SHA-256 verified)"
 
-      # tauri build chdirs into src-tauri before bundling, so the sign command
-      # uses absolute paths. It is applied only for this build, via Tauri's
-      # config merge, and sets bundle.windows.signCommand.
+      # Costs no signing: credential_info takes no one-time password. A wrong
+      # account, credential, or certificate (CN) stops the run here.
+      - name: Check eSigner credential (no signing)
+        shell: bash
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          CREDENTIAL_ID: ${{ secrets.CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: bun scripts/sign-windows.ts --check-credential
+
+      # Tauri starts signCommand.cmd with CreateProcess (no shell), so it must be
+      # a real .exe. bun writes the overlay with its own path; resolving `bun`
+      # from PowerShell picked npm's bun.ps1 shim and failed with os error 193.
       - name: Configure Tauri signCommand
-        shell: pwsh
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Stop'
-          # Prefer bun.exe. The npm global shim is bun.cmd, which Tauri can
-          # launch as well; either absolute path keeps the NSIS uninstaller
-          # hook from depending on PATH.
-          $bunCmd = Get-Command bun -ErrorAction Stop
-          $bun = $bunCmd.Source
-          $bunExe = Get-Command bun.exe -ErrorAction SilentlyContinue
-          if ($bunExe) { $bun = $bunExe.Source }
-          $bun = (Resolve-Path -LiteralPath $bun).Path
-          $script = (Resolve-Path -LiteralPath 'scripts\sign-windows.ts').Path
-          function Escape-Json([string]$value) {
-            return $value.Replace('\', '\\').Replace('"', '\"')
-          }
-          $configPath = Join-Path $env:RUNNER_TEMP 'windows-sign.json'
-          $json = @"
-          {
-            "bundle": {
-              "windows": {
-                "signCommand": {
-                  "cmd": "$(Escape-Json $bun)",
-                  "args": ["$(Escape-Json $script)", "%1"]
-                }
-              }
-            }
-          }
-          "@
-          $utf8 = New-Object System.Text.UTF8Encoding $false
-          [System.IO.File]::WriteAllText($configPath, $json.Trim(), $utf8)
-          Add-Content -Path $env:GITHUB_ENV -Value "TAURI_WINDOWS_SIGN_CONFIG=$configPath"
-          Write-Host "signCommand cmd: $bun"
-          Write-Host "signCommand script: $script"
+          set -euo pipefail
+          CONFIG="$RUNNER_TEMP/windows-sign.json"
+          bun scripts/sign-windows.ts --write-tauri-config "$CONFIG"
+          cat "$CONFIG"
+          echo "TAURI_WINDOWS_SIGN_CONFIG=$CONFIG" >> "$GITHUB_ENV"
 
       - name: Build + sign NSIS installer
         shell: bash

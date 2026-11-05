@@ -281,13 +281,69 @@ function verifyAuthenticode(filePath: string): void {
   }
 }
 
-function signFile(filePath: string, env: Env): void {
+function codeSignTool(env: Env): { toolDir: string; java: string; jar: string } {
   const toolDir = env.CODESIGNTOOL_DIR;
   if (!toolDir) fail("CODESIGNTOOL_DIR is not set");
   const java = path.join(toolDir, "jdk-11.0.2", "bin", "java.exe");
   const jar = path.join(toolDir, "jar", `code_sign_tool-${CODESIGNTOOL_VERSION}.jar`);
   if (!fs.existsSync(java)) fail(`CodeSignTool java missing at ${java}`);
   if (!fs.existsSync(jar)) fail(`CodeSignTool jar missing at ${jar}`);
+  return { toolDir, java, jar };
+}
+
+// `credential_info` returns the certificate behind CREDENTIAL_ID. It takes no
+// one-time password and signs nothing, so it costs no quota: a wrong account,
+// password, credential or certificate fails here, before tauri build signs.
+export function subjectFromCredentialInfo(output: string): string {
+  const match = output.match(/^[\s-]*Subject DN:[ \t]*(.+?)[ \t]*$/m);
+  if (!match) throw new Error("credential_info output has no Subject DN");
+  return match[1]!;
+}
+
+function checkCredential(env: Env): void {
+  const missing = missingSigningSecrets(env);
+  if (missing.length > 0) fail(`cannot check the eSigner credential: missing ${missing.join(", ")}`);
+  const { toolDir, java, jar } = codeSignTool(env);
+  const result = spawnSync(
+    java,
+    [
+      "-jar",
+      jar,
+      "credential_info",
+      `-username=${env.ES_USERNAME}`,
+      `-password=${env.ES_PASSWORD}`,
+      `-credential_id=${env.CREDENTIAL_ID}`,
+    ],
+    { cwd: toolDir, encoding: "utf8", windowsHide: true },
+  );
+  const raw = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  const shown = redact(raw, env);
+  if (shown.trim()) console.log(shown.trim());
+  if (result.error) fail(`could not start CodeSignTool: ${result.error.message}`);
+  if (result.status !== 0 || !/credential_info command executed successfully/i.test(raw)) {
+    fail(`CodeSignTool credential_info failed (exit ${result.status})`);
+  }
+  const subjectError = signerSubjectError(subjectFromCredentialInfo(raw));
+  if (subjectError) fail(subjectError);
+  console.log(`eSigner: credential OK, certificate is CN=${EXPECTED_SIGNER_CN}`);
+}
+
+// Tauri starts signCommand.cmd with CreateProcess: no shell, so it must be a
+// real executable. npm's bun shims (bun.ps1, bun.cmd, a bash script) are not;
+// the bun running this script is.
+function writeTauriSignConfig(outPath: string): void {
+  const bun = fs.realpathSync(process.execPath);
+  if (process.platform === "win32" && !bun.toLowerCase().endsWith(".exe")) {
+    fail(`bun is not running from an .exe (${bun}); Tauri could not start it`);
+  }
+  const script = fs.realpathSync(import.meta.path);
+  const config = { bundle: { windows: { signCommand: { cmd: bun, args: [script, "%1"] } } } };
+  fs.writeFileSync(outPath, JSON.stringify(config, null, 2));
+  console.log(`signCommand: ${bun} ${script} %1 -> ${outPath}`);
+}
+
+function signFile(filePath: string, env: Env): void {
+  const { toolDir, java, jar } = codeSignTool(env);
   if (!fs.existsSync(filePath)) fail(`file to sign does not exist: ${filePath}`);
 
   reserveOtpSlot(env);
@@ -341,6 +397,18 @@ function readLog(logPath: string): string[] {
 function main(): void {
   const argv = process.argv.slice(2);
   const env = process.env;
+
+  if (argv[0] === "--write-tauri-config") {
+    const outPath = argv[1];
+    if (!outPath) fail("--write-tauri-config needs an output path");
+    writeTauriSignConfig(outPath);
+    return;
+  }
+
+  if (argv[0] === "--check-credential") {
+    checkCredential(env);
+    return;
+  }
 
   if (argv[0] === "--check-log") {
     const logPath = argv[1];
