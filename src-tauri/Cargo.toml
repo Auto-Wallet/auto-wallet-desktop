@@ -1,6 +1,6 @@
 [package]
 name = "auto-desktop"
-version = "0.2.87"
+version = "0.2.88"
 description = "AutoDesktop — a lightweight desktop wallet & dApp browser"
 authors = ["Auto Wallet"]
 edition = "2021"
