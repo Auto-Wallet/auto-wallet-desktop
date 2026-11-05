@@ -25,11 +25,13 @@ There is no Windows portable `.zip`.
    auto-generated notes and a `latest.json` that lists only the macOS platforms.
 4. **Windows (optional, manual).** Once that release exists, run:
    ```bash
-   gh workflow run release-windows.yml --ref v0.1.0
+   gh workflow run release-windows.yml --ref main -f tag=v0.1.0
    ```
-   (or Actions -> **Release Windows** -> Run workflow, with the tag picked under
-   "Use workflow from"). A reviewer approves the `windows-signing` environment,
-   then the run builds the NSIS installer, signs it, checks the signatures,
+   (or Actions -> **Release Windows** -> Run workflow, branch `main`, tag
+   `v0.1.0`). The app is built from the tag; the workflow and
+   `scripts/sign-windows.ts` come from main, so a fix to the signing flow needs
+   no new release. A reviewer approves the `windows-signing` environment, then
+   the run checks the eSigner credential (no signing), builds the NSIS installer, signs it, checks the signatures,
    attaches the installer and its `.sig` to the release, and adds
    `windows-x86_64` to that release's `latest.json`.
 
@@ -46,7 +48,8 @@ NSIS plugin DLLs and the uninstaller stay unsigned. A cancelled or failed run
 may already have spent one or both, so the workflow never cancels itself.
 
 The run fails, and nothing is published, when:
-- it is not on a `v*` tag, the tag differs from `tauri.conf.json`'s version, or
+- it is not run from main, the tag is not `vX.Y.Z`, the tag's `tauri.conf.json`
+  version differs, or
   the release has no `latest.json` yet (all checked before any signing);
 - any eSigner secret is missing (there is no unsigned fallback);
 - the script runs in Actions from anything but `workflow_dispatch`;
@@ -63,7 +66,7 @@ signing secrets.
 `ES_USERNAME`, `ES_PASSWORD`, `CREDENTIAL_ID`, `ES_TOTP_SECRET` belong in the
 `windows-signing` environment (Settings -> Environments), **not** in repository
 secrets: repository secrets reach every workflow on every branch, and these four
-let anyone sign any file as CN=Lin Mo. The environment only accepts `v*` tags and
+let anyone sign any file as CN=Lin Mo. The environment only accepts the `main` branch and
 needs a required reviewer's approval before a run sees the secrets.
 
 The updater minisign key is separate: `TAURI_SIGNING_PRIVATE_KEY` and

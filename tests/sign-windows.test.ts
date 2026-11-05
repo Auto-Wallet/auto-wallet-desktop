@@ -165,6 +165,53 @@ test("release-windows.yml runs only on workflow_dispatch and keeps secrets behin
   expect(JSON.stringify(parsed.jobs.build)).toContain("--bundles nsis");
 });
 
+// The workflow runs from main and takes the release tag as an input: the app is
+// built from the tag, the signing tooling comes from main. Fixing the signing
+// flow then needs no new app release (v0.2.87 and v0.2.88 each failed in the
+// signing tooling only, and a tag carries its own copy of it).
+const runsOf = (steps: any[]) => steps.map((step) => String(step.run ?? ""));
+
+test("release-windows.yml takes the release tag as an input and runs from main only", () => {
+  const { parsed } = readWorkflow("release-windows.yml");
+  const tagInput = parsed.on.workflow_dispatch.inputs.tag;
+  expect(tagInput.required).toBe(true);
+  expect(tagInput.type).toBe("string");
+  expect(parsed.concurrency.group).toContain("inputs.tag");
+
+  const preflight = runsOf(parsed.jobs.preflight.steps).join("\n");
+  expect(preflight).toContain('"$GITHUB_REF" != "refs/heads/main"');
+  expect(preflight).toContain("^v[0-9]+\\.[0-9]+\\.[0-9]+$");
+
+  for (const job of Object.values<any>(parsed.jobs)) {
+    for (const run of runsOf(job.steps)) {
+      // Inputs reach shell only through env (no ${{ }} expansion into scripts),
+      // and the run's own ref is main, never the tag.
+      expect(run).not.toContain("inputs.tag");
+      expect(run).not.toContain("GITHUB_REF_NAME");
+    }
+  }
+});
+
+test("the build checks out the app at the tag and the signing script from main", () => {
+  const { parsed } = readWorkflow("release-windows.yml");
+  for (const jobName of ["preflight", "build"]) {
+    const checkouts = (parsed.jobs[jobName].steps as any[]).filter((step) => String(step.uses ?? "").startsWith("actions/checkout"));
+    const app = checkouts.find((step) => !step.with?.path);
+    expect(app.with.ref).toBe("refs/tags/${{ inputs.tag }}");
+  }
+  const steps = parsed.jobs.build.steps as any[];
+  const tooling = steps.find((step) => step.with?.path === ".signing-tools");
+  expect(tooling.uses).toStartWith("actions/checkout");
+  expect(tooling.with.ref).toBe("${{ github.sha }}");
+
+  const signing = runsOf(steps).filter((run) => run.includes("sign-windows.ts"));
+  expect(signing.length).toBe(3); // check credential, write signCommand config, verify
+  for (const run of signing) {
+    expect(run).not.toMatch(/(^|[\s"'])scripts\/sign-windows\.ts/m);
+    expect(run).toContain(".signing-tools/scripts/sign-windows.ts");
+  }
+});
+
 test("CodeSignTool version and pinned hash in the workflow match the script", () => {
   const { parsed } = readWorkflow("release-windows.yml");
   expect(parsed.env.CODESIGNTOOL_VERSION).toBe(CODESIGNTOOL_VERSION);

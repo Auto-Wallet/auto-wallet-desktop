@@ -4,25 +4,34 @@ name: Release Windows
 # spends two of the 20 eSigner signings the SSL.com plan allows per month
 # (the app exe packed inside the installer, and the NSIS setup exe).
 #
-# Run it on a release tag whose GitHub Release already exists. Pushing the tag
-# runs release.yml, which publishes the macOS builds and latest.json:
-#   gh workflow run release-windows.yml --ref v0.2.87
-# (or Actions -> Release Windows -> Run workflow -> "Use workflow from": the tag)
+# Run it from main, naming a release tag whose GitHub Release already exists.
+# Pushing the tag runs release.yml, which publishes the macOS builds and
+# latest.json:
+#   gh workflow run release-windows.yml --ref main -f tag=v0.2.88
+# (or Actions -> Release Windows -> Run workflow, branch main, tag v0.2.88)
+#
+# The app is built from the tag. This workflow and scripts/sign-windows.ts come
+# from main, so a fix to the signing flow needs no new app release.
 #
 # It builds the NSIS installer only (no portable zip), Authenticode-signs it
-# through Tauri's bundle.windows.signCommand (scripts/sign-windows.ts), verifies
-# the signatures and the updater minisign signature, then attaches
+# through Tauri's bundle.windows.signCommand, verifies the signatures and the
+# updater minisign signature, then attaches
 # AutoDesktop_<ver>_windows_x86_64_setup.exe (+ .sig) to the release and adds the
 # windows-x86_64 entry to the release's latest.json.
 #
-# The eSigner secrets live in the `windows-signing` environment, which only `v*`
-# tags may deploy to and which needs a reviewer's approval.
+# The eSigner secrets live in the `windows-signing` environment, which only main
+# may deploy to and which needs a reviewer's approval.
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build, e.g. v0.2.88 (its GitHub Release must exist)
+        type: string
+        required: true
 
 # Never cancel a run midway: a cancelled build may already have spent signings.
 concurrency:
-  group: release-windows-${{ github.ref }}
+  group: release-windows-${{ inputs.tag }}
   cancel-in-progress: false
 
 permissions:
@@ -44,29 +53,43 @@ jobs:
     name: Check tag and release
     runs-on: ubuntu-latest
     steps:
+      # Before anything reads the input as a ref or a path.
+      - name: Run from main, with a vX.Y.Z tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Run this workflow from main (got $GITHUB_REF); name the release in the tag input."
+            exit 1
+          fi
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag must look like v1.2.3, got '$TAG'."
+            exit 1
+          fi
+
       - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ inputs.tag }}
 
       - name: Tag, app version, and existing release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          if [ "$GITHUB_REF_TYPE" != "tag" ] || [[ "$GITHUB_REF_NAME" != v* ]]; then
-            echo "::error::Run this workflow on a v* release tag, not ${GITHUB_REF_TYPE} '${GITHUB_REF_NAME}'."
-            exit 1
-          fi
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${TAG#v}"
           CONF_VERSION=$(node -p 'require("./src-tauri/tauri.conf.json").version')
           if [ "$CONF_VERSION" != "$VERSION" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match tauri.conf.json version $CONF_VERSION."
+            echo "::error::Tag $TAG does not match its tauri.conf.json version $CONF_VERSION."
             exit 1
           fi
-          ASSETS=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          ASSETS=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
           if ! grep -qx 'latest.json' <<<"$ASSETS"; then
-            echo "::error::Release $GITHUB_REF_NAME has no latest.json yet. Wait for release.yml to publish it."
+            echo "::error::Release $TAG has no latest.json yet. Wait for release.yml to publish it."
             exit 1
           fi
-          echo "Release $GITHUB_REF_NAME found; building Windows $VERSION."
+          echo "Release $TAG found; building Windows $VERSION from the tag, signing tooling from main ($GITHUB_SHA)."
 
   # ---------------------------------------------------------------------------
   build:
@@ -74,8 +97,22 @@ jobs:
     needs: preflight
     runs-on: windows-latest
     environment: windows-signing
+    env:
+      TAG: ${{ inputs.tag }}
     steps:
+      # The app at the release tag, at the workspace root.
       - uses: actions/checkout@v5
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      # The signing script from main (this run's commit), beside it. After the
+      # app checkout, which would otherwise clean it away.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          path: .signing-tools
+          sparse-checkout: scripts/sign-windows.ts
+          sparse-checkout-cone-mode: false
 
       - name: Install Bun
         shell: bash
@@ -162,7 +199,7 @@ jobs:
           ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
           CREDENTIAL_ID: ${{ secrets.CREDENTIAL_ID }}
           ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
-        run: bun scripts/sign-windows.ts --check-credential
+        run: bun .signing-tools/scripts/sign-windows.ts --check-credential
 
       # Tauri starts signCommand.cmd with CreateProcess (no shell), so it must be
       # a real .exe. bun writes the overlay with its own path; resolving `bun`
@@ -172,7 +209,7 @@ jobs:
         run: |
           set -euo pipefail
           CONFIG="$RUNNER_TEMP/windows-sign.json"
-          bun scripts/sign-windows.ts --write-tauri-config "$CONFIG"
+          bun .signing-tools/scripts/sign-windows.ts --write-tauri-config "$CONFIG"
           cat "$CONFIG"
           echo "TAURI_WINDOWS_SIGN_CONFIG=$CONFIG" >> "$GITHUB_ENV"
 
@@ -212,15 +249,15 @@ jobs:
             exit 1
           fi
           INSTALLER=${installers[0]}
-          bun scripts/sign-windows.ts --check-log "$ESIGNER_SIGN_LOG"
-          bun scripts/sign-windows.ts --verify "$INSTALLER"
-          bun scripts/sign-windows.ts --verify-updater-sig "$INSTALLER" src-tauri/tauri.conf.json
+          bun .signing-tools/scripts/sign-windows.ts --check-log "$ESIGNER_SIGN_LOG"
+          bun .signing-tools/scripts/sign-windows.ts --verify "$INSTALLER"
+          bun .signing-tools/scripts/sign-windows.ts --verify-updater-sig "$INSTALLER" src-tauri/tauri.conf.json
 
       - name: Stage installer
         shell: bash
         run: |
           set -euxo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${TAG#v}"
           ASSET="AutoDesktop_${VERSION}_windows_x86_64_setup.exe"
           INSTALLER=$(ls src-tauri/target/release/bundle/nsis/*-setup.exe)
           mkdir -p dist
@@ -250,9 +287,9 @@ jobs:
       - name: Upload installer and update latest.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          TAG="$GITHUB_REF_NAME"
           VERSION="${TAG#v}"
           ASSET="AutoDesktop_${VERSION}_windows_x86_64_setup.exe"
           test -f "dist/$ASSET"

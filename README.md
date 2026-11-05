@@ -118,7 +118,7 @@ The frontend onboarding/Settings flows are verified visually via a Chrome CDP ha
 
 Windows release builds are Authenticode-signed with an SSL.com Personal ID certificate (**CN=Lin Mo**) through [eSigner](https://www.ssl.com/esigner/) cloud signing. macOS release builds are signed and notarized with a Developer ID Application certificate.
 
-macOS builds are produced by [`.github/workflows/release.yml`](.github/workflows/release.yml) on a `v*` tag. Windows builds are produced only by hand, by [`.github/workflows/release-windows.yml`](.github/workflows/release-windows.yml) run on a release tag. The published installer is `AutoDesktop_<version>_windows_x86_64_setup.exe` on the [GitHub Releases](https://github.com/Auto-Wallet/auto-wallet-desktop/releases) page (`auto-desktop` in older links is this same repository).
+macOS builds are produced by [`.github/workflows/release.yml`](.github/workflows/release.yml) on a `v*` tag. Windows builds are produced only by hand, by [`.github/workflows/release-windows.yml`](.github/workflows/release-windows.yml), run from `main` with a release tag as input. The published installer is `AutoDesktop_<version>_windows_x86_64_setup.exe` on the [GitHub Releases](https://github.com/Auto-Wallet/auto-wallet-desktop/releases) page (`auto-desktop` in older links is this same repository).
 
 ### Windows Authenticode (SSL.com eSigner)
 
@@ -126,7 +126,7 @@ Signing uses [CodeSignTool](https://github.com/SSLcom/CodeSignTool) 1.3.2; the w
 
 Each Windows build spends **two** eSigner signings: `auto-desktop.exe` packed inside the installer, and the NSIS setup exe. NSIS plugin DLLs and the uninstaller stay unsigned. There is no portable zip.
 
-A run never publishes an unsigned installer. It stops if a signing secret is missing, and checks every signed file with `Get-AuthenticodeSignature` and `signtool verify /pa` (valid, timestamped, CN=Lin Mo), and the updater `.sig` against the app's updater public key. The eSigner secrets live in the `windows-signing` GitHub environment, which accepts only `v*` tags and requires a reviewer's approval. Release steps are in [RELEASING.md](RELEASING.md).
+A run never publishes an unsigned installer. It stops if a signing secret is missing, and checks every signed file with `Get-AuthenticodeSignature` and `signtool verify /pa` (valid, timestamped, CN=Lin Mo), and the updater `.sig` against the app's updater public key. The eSigner secrets live in the `windows-signing` GitHub environment, which accepts only the `main` branch and requires a reviewer's approval. Release steps are in [RELEASING.md](RELEASING.md).
 
 ### Team roles
 
