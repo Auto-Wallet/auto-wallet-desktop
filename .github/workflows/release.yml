@@ -3,12 +3,25 @@ name: Release
 # Push a `v*` tag (e.g. `v0.1.0`) to build standalone clients and publish them to
 # the matching GitHub Release:
 #   - macOS : signed + notarized .dmg for Apple Silicon (aarch64) and Intel (x64)
-#   - Windows: standalone .zip plus an NSIS updater installer
+#   - Windows: standalone .zip plus an NSIS updater installer. When the eSigner
+#     secrets are set, both are Authenticode-signed during bundling
+#     (scripts/sign-windows.ts). A tag push without those secrets still publishes
+#     unsigned Windows artifacts.
 # Asset names embed the OS + arch so they are unambiguous on the release page.
+#
+# workflow_dispatch builds Windows only and does not publish a release. Use it
+# to test Authenticode signing. `require_windows_signing` fails that run when
+# the eSigner secrets are absent.
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      require_windows_signing:
+        description: Fail the run if the eSigner secrets are missing
+        type: boolean
+        default: true
 
 concurrency:
   group: release-${{ github.ref }}
@@ -33,6 +46,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" != "push" ]; then
+            echo "Not a tag push; leaving other CI runs alone."
+            exit 0
+          fi
           for status in queued in_progress; do
             gh run list \
               --repo "$GITHUB_REPOSITORY" \
@@ -51,6 +68,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-macos:
     name: macOS (${{ matrix.arch }})
+    if: github.event_name == 'push'
     needs: cancel-redundant-ci
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -370,7 +388,108 @@ jobs:
           set -euxo pipefail
           bun install
 
+      # Tag pushes without the four secrets keep publishing unsigned artifacts
+      # (forks, or before the secrets exist). A manual test run fails instead,
+      # so an unsigned build is not mistaken for a signed one.
+      - name: Decide Windows Authenticode signing
+        id: sign
+        shell: bash
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          CREDENTIAL_ID: ${{ secrets.CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          set -euo pipefail
+          missing=0
+          [ -n "$ES_USERNAME" ] || missing=1
+          [ -n "$ES_PASSWORD" ] || missing=1
+          [ -n "$CREDENTIAL_ID" ] || missing=1
+          [ -n "$ES_TOTP_SECRET" ] || missing=1
+          if [ "$missing" -eq 0 ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Windows Authenticode signing enabled (SSL.com eSigner)."
+            exit 0
+          fi
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "${{ github.event.inputs.require_windows_signing }}" = "true" ]; then
+            echo "::error::eSigner secrets are missing. Add ES_USERNAME, ES_PASSWORD, CREDENTIAL_ID, and ES_TOTP_SECRET, then re-run."
+            exit 1
+          fi
+          echo "::notice::eSigner secrets are not all set. Windows artifacts will be unsigned."
+
+      # Same CodeSignTool release SSLcom/esigner-codesign downloads. The Windows
+      # zip includes its own JRE. Version matches CODESIGNTOOL_VERSION in
+      # scripts/sign-windows.ts.
+      - name: Install CodeSignTool
+        if: steps.sign.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '1.3.2'
+          $url = "https://github.com/SSLcom/CodeSignTool/releases/download/v$version/CodeSignTool-v$version-windows.zip"
+          $dest = Join-Path $env:RUNNER_TEMP 'CodeSignTool'
+          $zip = Join-Path $env:RUNNER_TEMP 'CodeSignTool.zip'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $downloaded = $false
+          foreach ($try in 1..5) {
+            Write-Host "Downloading CodeSignTool $version (attempt $try)"
+            & curl.exe -fL --retry 3 --retry-delay 2 -o $zip $url
+            if ($LASTEXITCODE -eq 0) { $downloaded = $true; break }
+            Start-Sleep -Seconds ($try * 5)
+          }
+          if (-not $downloaded) { throw "Failed to download CodeSignTool $version" }
+          tar.exe -xf $zip -C $dest
+          $java = Join-Path $dest 'jdk-11.0.2\bin\java.exe'
+          $jar = Join-Path $dest "jar\code_sign_tool-$version.jar"
+          if (-not (Test-Path -LiteralPath $java)) { throw "Missing $java" }
+          if (-not (Test-Path -LiteralPath $jar)) { throw "Missing $jar" }
+          Add-Content -Path $env:GITHUB_ENV -Value "CODESIGNTOOL_DIR=$dest"
+          Add-Content -Path $env:GITHUB_ENV -Value 'ESIGNER_REQUIRED=true'
+          Add-Content -Path $env:GITHUB_ENV -Value "ESIGNER_SIGN_LOG=$env:RUNNER_TEMP\esigner-signed.txt"
+          Write-Host "CodeSignTool $version ready"
+
+      # tauri build chdirs into src-tauri before bundling, so the sign command
+      # uses absolute paths. It is applied only for this build, via Tauri's
+      # config merge, and sets bundle.windows.signCommand.
+      - name: Configure Tauri signCommand
+        if: steps.sign.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Prefer bun.exe. The npm global shim is bun.cmd, which Tauri can
+          # launch as well; either absolute path keeps the NSIS uninstaller
+          # hook from depending on PATH.
+          $bunCmd = Get-Command bun -ErrorAction Stop
+          $bun = $bunCmd.Source
+          $bunExe = Get-Command bun.exe -ErrorAction SilentlyContinue
+          if ($bunExe) { $bun = $bunExe.Source }
+          $bun = (Resolve-Path -LiteralPath $bun).Path
+          $script = (Resolve-Path -LiteralPath 'scripts\sign-windows.ts').Path
+          function Escape-Json([string]$value) {
+            return $value.Replace('\', '\\').Replace('"', '\"')
+          }
+          $configPath = Join-Path $env:RUNNER_TEMP 'windows-sign.json'
+          $json = @"
+          {
+            "bundle": {
+              "windows": {
+                "signCommand": {
+                  "cmd": "$(Escape-Json $bun)",
+                  "args": ["$(Escape-Json $script)", "%1"]
+                }
+              }
+            }
+          }
+          "@
+          $utf8 = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::WriteAllText($configPath, $json.Trim(), $utf8)
+          Add-Content -Path $env:GITHUB_ENV -Value "TAURI_WINDOWS_SIGN_CONFIG=$configPath"
+          Write-Host "signCommand cmd: $bun"
+          Write-Host "signCommand script: $script"
+
       - name: Build executable + NSIS updater installer
+        shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -382,13 +501,52 @@ jobs:
           OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
           OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
           OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
-        run: bun run tauri build --bundles nsis
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          CREDENTIAL_ID: ${{ secrets.CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          set -euo pipefail
+          args=(--bundles nsis)
+          if [ -n "${TAURI_WINDOWS_SIGN_CONFIG:-}" ]; then
+            args+=(--config "$TAURI_WINDOWS_SIGN_CONFIG")
+          fi
+          # signCommand runs while NSIS is built: the patched app exe, then the
+          # setup exe. Tauri writes <setup>.exe.sig after that, so the updater
+          # signature covers the signed installer. Plugin DLLs and uninstall.exe
+          # are skipped inside the script (eSigner quota).
+          bun run tauri build "${args[@]}"
+          if [ "${ESIGNER_REQUIRED:-}" = "true" ]; then
+            # Bundling restores target/release/auto-desktop.exe to the unsigned
+            # unpatched bytes. Sign that copy for the portable zip.
+            bun scripts/sign-windows.ts src-tauri/target/release/auto-desktop.exe
+          fi
+
+      - name: Verify Windows Authenticode signatures
+        if: steps.sign.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          installers=(src-tauri/target/release/bundle/nsis/*.exe)
+          if [ "${#installers[@]}" -eq 0 ]; then
+            echo "::error::NSIS installer was not produced"
+            exit 1
+          fi
+          INSTALLER=${installers[0]}
+          bun scripts/sign-windows.ts --verify "$INSTALLER"
+          bun scripts/sign-windows.ts --verify src-tauri/target/release/auto-desktop.exe
+          bun scripts/sign-windows.ts --check-log "$ESIGNER_SIGN_LOG"
+          bun scripts/sign-windows.ts --check-updater-sig "$INSTALLER"
 
       - name: Stage artifacts
         shell: bash
         run: |
           set -euxo pipefail
+          # Tag names are v1.2.3. A manual run's ref can be a branch, so drop
+          # slashes before they become directories in the artifact name.
           VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${VERSION//\//-}"
           mkdir -p dist staging
           cp src-tauri/target/release/auto-desktop.exe "staging/AutoDesktop.exe"
           7z a "dist/AutoDesktop_${VERSION}_windows_x64.zip" ./staging/*
@@ -427,6 +585,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     name: Publish GitHub Release
+    if: github.event_name == 'push'
     needs: [build-macos, build-windows]
     runs-on: ubuntu-latest
     steps:
@@ -457,12 +616,11 @@ jobs:
         with:
           draft: false
           generate_release_notes: true
-          # Prepended to the generated notes. SignPath Foundation asks for this
-          # heading on the download/release page as well as the repository home page.
+          # Prepended to the generated notes.
           body: |
-            ## Code signing policy
+            ## Code signing
 
-            Free code signing provided by SignPath.io, certificate by SignPath Foundation.
+            Windows installers and the application executable are Authenticode-signed with an SSL.com Personal ID certificate (CN=Lin Mo) via eSigner when this repository's eSigner secrets are configured. macOS releases are signed and notarized with a Developer ID Application certificate.
 
             Team roles, the privacy policy, and Windows uninstall steps: https://github.com/Auto-Wallet/auto-wallet-desktop#code-signing-policy
           files: |

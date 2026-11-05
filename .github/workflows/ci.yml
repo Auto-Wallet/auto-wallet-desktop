@@ -113,6 +113,10 @@ jobs:
         shell: bash
         run: bunx tsc --noEmit
 
+      - name: Windows signing policy tests
+        shell: bash
+        run: bun test tests/sign-windows.test.ts
+
       - name: Rust tests (unit + offline mock-runtime e2e)
         if: runner.os != 'Windows'
         shell: bash
