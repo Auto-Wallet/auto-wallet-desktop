@@ -366,7 +366,8 @@ export default function SettingsPage() {
                       >
                         <Icon name="edit" size={16} />
                       </button>
-                      {!c.builtin && (
+                      {/* Built-ins can go too; only the last network stays (the backend refuses it). */}
+                      {chains.length > 1 && (
                         <button
                           className="icon-btn bare"
                           type="button"

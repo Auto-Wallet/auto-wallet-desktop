@@ -604,7 +604,8 @@ struct ChainCfg {
         skip_serializing_if = "Option::is_none"
     )]
     explorer_url: Option<String>,
-    /// Built-in chains can be edited (rpc/name/symbol) but not removed.
+    /// Ships with the app (vs. added by the user). Both kinds can be edited and
+    /// removed; a removed built-in is kept off by removed-chains.json.
     builtin: bool,
 }
 
@@ -961,13 +962,17 @@ fn builtin_chains() -> Vec<ChainCfg> {
 /// and a persisted entry whose id has since become a built-in is promoted
 /// (non-removable, sorted with the built-ins). Built-ins the file doesn't know
 /// about are backfilled with current defaults, in built-in order; custom chains
-/// keep their relative order at the end.
-fn merge_persisted_chains(mut persisted: Vec<ChainCfg>) -> Vec<ChainCfg> {
+/// keep their relative order at the end. Built-ins the user deleted (`removed`)
+/// are not backfilled — otherwise a deleted network would return on every launch.
+fn merge_persisted_chains(mut persisted: Vec<ChainCfg>, removed: &[String]) -> Vec<ChainCfg> {
     for chain in &mut persisted {
         hydrate_chain_defaults(chain);
     }
     let mut merged: Vec<ChainCfg> = Vec::new();
     for builtin in builtin_chains() {
+        if removed.iter().any(|r| r.eq_ignore_ascii_case(&builtin.id)) {
+            continue;
+        }
         match persisted
             .iter()
             .find(|c| c.id.eq_ignore_ascii_case(&builtin.id))
@@ -987,11 +992,67 @@ fn merge_persisted_chains(mut persisted: Vec<ChainCfg>) -> Vec<ChainCfg> {
         }
     }
     for chain in persisted {
-        if !merged.iter().any(|c| c.id.eq_ignore_ascii_case(&chain.id)) {
+        // A snapshot can still hold a deleted built-in (an older app version
+        // backfilled it); the user's delete wins.
+        let deleted = removed.iter().any(|r| r.eq_ignore_ascii_case(&chain.id));
+        if !deleted && !merged.iter().any(|c| c.id.eq_ignore_ascii_case(&chain.id)) {
             merged.push(chain);
         }
     }
     merged
+}
+
+fn is_builtin_chain_id(id: &str) -> bool {
+    builtin_chains().iter().any(|c| c.id.eq_ignore_ascii_case(id))
+}
+
+/// Delete a network from the registry. A deleted built-in is recorded in
+/// `removed` (lowercase ids) so the startup merge doesn't backfill it. The last
+/// network can't go: the wallet always needs an active chain.
+fn remove_from_registry(
+    chains: &mut Vec<ChainCfg>,
+    removed: &mut Vec<String>,
+    id: &str,
+) -> Result<(), String> {
+    let target = chains
+        .iter()
+        .find(|c| c.id.eq_ignore_ascii_case(id))
+        .ok_or_else(|| format!("network {id} not found"))?;
+    if chains.len() == 1 {
+        return Err("the last network can't be removed".to_string());
+    }
+    if target.builtin || is_builtin_chain_id(id) {
+        let id = id.to_ascii_lowercase();
+        if !removed.contains(&id) {
+            removed.push(id);
+        }
+    }
+    chains.retain(|c| !c.id.eq_ignore_ascii_case(id));
+    Ok(())
+}
+
+/// Add a network to the registry. Re-adding a deleted built-in clears its
+/// removed mark and makes it a built-in again (the user's values are kept),
+/// matching what the startup merge does for a hand-added built-in id.
+fn add_to_registry(
+    chains: &mut Vec<ChainCfg>,
+    removed: &mut Vec<String>,
+    mut chain: ChainCfg,
+) -> Result<(), String> {
+    if chains.iter().any(|c| c.id.eq_ignore_ascii_case(&chain.id)) {
+        return Err(format!("network {} already exists", chain.id));
+    }
+    chain.builtin = is_builtin_chain_id(&chain.id);
+    removed.retain(|r| !r.eq_ignore_ascii_case(&chain.id));
+    chains.push(chain);
+    Ok(())
+}
+
+/// Built-in chain ids the user deleted (lowercase). Persisted to
+/// removed-chains.json; `load_chains` fills it at startup.
+fn removed_builtins_state() -> &'static Mutex<Vec<String>> {
+    static R: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 /// The effective chain registry (built-ins + user edits/additions). Initialized to
@@ -3156,7 +3217,8 @@ async fn handle_rpc<R: Runtime>(
                     {
                         let mut chains = chains_state().lock().unwrap();
                         if !chains.iter().any(|c| c.id.eq_ignore_ascii_case(&new_id)) {
-                            chains.push(chain);
+                            let mut removed = removed_builtins_state().lock().unwrap();
+                            add_to_registry(&mut chains, &mut removed, chain)?;
                         }
                     }
                     save_chains(app)?;
@@ -4067,12 +4129,14 @@ fn get_active_chain() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Chain registry CRUD (Settings → manage networks). Shell-only. Built-in chains
-// can be edited (rpc/name/symbol) but not removed; user chains are full CRUD. The
-// effective list is persisted (non-sensitive) to chains.json in the app-data dir.
+// Chain registry CRUD (Settings → manage networks). Shell-only. Every network,
+// built-in or not, can be edited and removed (except the last one). The effective
+// list is persisted (non-sensitive) to chains.json in the app-data dir, and the
+// ids of deleted built-ins to removed-chains.json so they stay deleted.
 // ---------------------------------------------------------------------------
 
 const CHAINS_FILE: &str = "chains.json";
+const REMOVED_CHAINS_FILE: &str = "removed-chains.json";
 
 fn chains_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     Ok(app
@@ -4085,25 +4149,50 @@ fn chains_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
 /// Load the persisted chain list (built-ins + user edits) at startup, if present.
 fn load_chains<R: Runtime>(app: &AppHandle<R>) {
     let Ok(path) = chains_path(app) else { return };
-    if let Ok(bytes) = std::fs::read(&path) {
-        if let Ok(list) = serde_json::from_slice::<Vec<ChainCfg>>(&bytes) {
-            if !list.is_empty() {
-                // Merge (not replace): a snapshot from an older version is missing
-                // built-ins added since, and must not freeze the registry.
-                *chains_state().lock().unwrap() = merge_persisted_chains(list);
+    if let Some(dir) = path.parent() {
+        if let Ok(bytes) = std::fs::read(dir.join(REMOVED_CHAINS_FILE)) {
+            match serde_json::from_slice::<Vec<String>>(&bytes) {
+                Ok(ids) => *removed_builtins_state().lock().unwrap() = ids,
+                Err(e) => println!("[AutoDesktop] ignoring unreadable {REMOVED_CHAINS_FILE}: {e}"),
             }
+        }
+    }
+    let removed = removed_builtins_state().lock().unwrap().clone();
+    let persisted = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<ChainCfg>>(&bytes).ok())
+        .filter(|list| !list.is_empty());
+    if let Some(list) = persisted {
+        // Merge (not replace): a snapshot from an older version is missing
+        // built-ins added since, and must not freeze the registry.
+        *chains_state().lock().unwrap() = merge_persisted_chains(list, &removed);
+    } else if !removed.is_empty() {
+        *chains_state().lock().unwrap() = merge_persisted_chains(Vec::new(), &removed);
+    }
+    // The active chain starts as 0x1 and isn't persisted; if the user deleted
+    // Ethereum, start on the first network that still exists.
+    let chains = chains_state().lock().unwrap();
+    let mut cur = current_chain().lock().unwrap();
+    if !chains.iter().any(|c| c.id.eq_ignore_ascii_case(&cur)) {
+        if let Some(first) = chains.first() {
+            *cur = first.id.clone();
         }
     }
 }
 
 fn save_chains<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let path = chains_path(app)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
+    let dir = path
+        .parent()
+        .ok_or_else(|| format!("chains path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let list = chains_state().lock().unwrap().clone();
     let json = serde_json::to_vec_pretty(&list).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| format!("writing chains: {e}"))
+    std::fs::write(&path, json).map_err(|e| format!("writing chains: {e}"))?;
+    let removed = removed_builtins_state().lock().unwrap().clone();
+    let json = serde_json::to_vec_pretty(&removed).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(REMOVED_CHAINS_FILE), json)
+        .map_err(|e| format!("writing removed chains: {e}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -7374,10 +7463,8 @@ fn add_chain<R: Runtime>(app: AppHandle<R>, mut chain: ChainCfg) -> Result<Vec<C
     };
     {
         let mut chains = chains_state().lock().unwrap();
-        if chains.iter().any(|c| c.id.eq_ignore_ascii_case(&chain.id)) {
-            return Err(format!("network {} already exists", chain.id));
-        }
-        chains.push(chain);
+        let mut removed = removed_builtins_state().lock().unwrap();
+        add_to_registry(&mut chains, &mut removed, chain)?;
     }
     save_chains(&app)?;
     Ok(chains_state().lock().unwrap().clone())
@@ -7423,30 +7510,31 @@ fn update_chain<R: Runtime>(app: AppHandle<R>, chain: ChainCfg) -> Result<Vec<Ch
     Ok(chains_state().lock().unwrap().clone())
 }
 
-/// Remove a user-added network (built-ins can't be removed). Falls the active
-/// chain back to the first network if the removed one was active.
+/// Remove a network, built-in or not (the last one stays). If it was active, the
+/// active chain falls back to the first network, and the shell and every open
+/// dApp are told — otherwise they would keep showing a chain that no longer exists.
 #[tauri::command]
 fn remove_chain<R: Runtime>(app: AppHandle<R>, id: String) -> Result<Vec<ChainCfg>, String> {
     let id = normalize_chain_id(&id)?;
     {
         let mut chains = chains_state().lock().unwrap();
-        let target = chains
-            .iter()
-            .find(|c| c.id.eq_ignore_ascii_case(&id))
-            .ok_or_else(|| format!("network {id} not found"))?;
-        if target.builtin {
-            return Err("built-in networks can't be removed".to_string());
-        }
-        chains.retain(|c| !c.id.eq_ignore_ascii_case(&id));
+        let mut removed = removed_builtins_state().lock().unwrap();
+        remove_from_registry(&mut chains, &mut removed, &id)?;
     }
     let fallback = chains_state().lock().unwrap().first().map(|c| c.id.clone());
-    {
+    let switched_to = {
         let mut cur = current_chain().lock().unwrap();
-        if cur.eq_ignore_ascii_case(&id) {
-            if let Some(f) = fallback {
-                *cur = f;
+        match fallback {
+            Some(f) if cur.eq_ignore_ascii_case(&id) => {
+                *cur = f.clone();
+                Some(f)
             }
+            _ => None,
         }
+    };
+    if let Some(new_id) = switched_to {
+        let _ = app.emit("active-chain-changed", new_id.clone());
+        push_chain_changed(&app, &new_id);
     }
     save_chains(&app)?;
     Ok(chains_state().lock().unwrap().clone())
@@ -9422,7 +9510,7 @@ mod tests {
             explorer_url: None,
             builtin: false,
         };
-        let merged = merge_persisted_chains(vec![old_eth, custom]);
+        let merged = merge_persisted_chains(vec![old_eth, custom], &[]);
 
         // Every current built-in is present, in built-in order.
         let builtins = builtin_chains();
@@ -9450,7 +9538,7 @@ mod tests {
             .unwrap();
         old_default.rpc = "https://bsc-rpc.publicnode.com".to_string();
 
-        let migrated = merge_persisted_chains(vec![old_default]);
+        let migrated = merge_persisted_chains(vec![old_default], &[]);
         assert_eq!(
             migrated.iter().find(|c| c.id == "0x38").unwrap().rpc,
             "https://bsc-dataseed.bnbchain.org"
@@ -9462,7 +9550,7 @@ mod tests {
             .unwrap();
         custom.rpc = "https://my-bnb-node.example".to_string();
 
-        let preserved = merge_persisted_chains(vec![custom]);
+        let preserved = merge_persisted_chains(vec![custom], &[]);
         assert_eq!(
             preserved.iter().find(|c| c.id == "0x38").unwrap().rpc,
             "https://my-bnb-node.example"
@@ -9484,7 +9572,7 @@ mod tests {
             explorer_url: None,
             builtin: false,
         }];
-        let merged = merge_persisted_chains(persisted);
+        let merged = merge_persisted_chains(persisted, &[]);
         let bnb = merged.iter().find(|c| c.id == "0x38").unwrap();
         assert!(bnb.builtin, "matching built-in id must be promoted");
         assert_eq!(
@@ -9498,6 +9586,91 @@ mod tests {
             "missing explorer url is hydrated"
         );
         assert_eq!(merged.len(), builtin_chains().len());
+    }
+
+    /// A built-in the user deleted must stay deleted across restarts: the merge
+    /// backfills missing built-ins, so it has to skip the ones on the removed list.
+    #[test]
+    fn merge_persisted_chains_skips_removed_builtins() {
+        let persisted: Vec<ChainCfg> = builtin_chains()
+            .into_iter()
+            .filter(|c| c.id != "0x38" && c.id != "0x89")
+            .collect();
+        // Mixed case on purpose: ids compare case-insensitively everywhere else.
+        let merged = merge_persisted_chains(persisted, &["0x38".to_string(), "0X89".to_string()]);
+        assert!(merged.iter().all(|c| c.id != "0x38" && c.id != "0x89"));
+        assert_eq!(merged.len(), builtin_chains().len() - 2);
+        // Built-ins NOT on the removed list are still backfilled.
+        let without_eth: Vec<ChainCfg> = builtin_chains().into_iter().skip(1).collect();
+        let merged = merge_persisted_chains(without_eth, &["0x38".to_string()]);
+        assert_eq!(merged[0].id, "0x1");
+        assert!(merged.iter().all(|c| c.id != "0x38"));
+    }
+
+    fn custom_chain(id: &str) -> ChainCfg {
+        ChainCfg {
+            id: id.to_string(),
+            name: format!("Custom {id}"),
+            symbol: "TST".to_string(),
+            rpc: "https://rpc.example".to_string(),
+            decimals: 18,
+            color: "#888888".to_string(),
+            explorer_url: None,
+            builtin: false,
+        }
+    }
+
+    #[test]
+    fn remove_from_registry_records_only_builtins() {
+        let mut chains = builtin_chains();
+        chains.push(custom_chain("0x40d9"));
+        let mut removed = Vec::new();
+
+        remove_from_registry(&mut chains, &mut removed, "0xA4B1").unwrap();
+        assert!(chains.iter().all(|c| c.id != "0xa4b1"));
+        assert_eq!(removed, vec!["0xa4b1".to_string()]);
+
+        remove_from_registry(&mut chains, &mut removed, "0x40d9").unwrap();
+        assert!(chains.iter().all(|c| c.id != "0x40d9"));
+        assert_eq!(removed, vec!["0xa4b1".to_string()], "custom ids are not recorded");
+        assert_eq!(chains.len(), builtin_chains().len() - 1);
+
+        let err = remove_from_registry(&mut chains, &mut removed, "0xa4b1").unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn remove_from_registry_refuses_the_last_network() {
+        let mut chains = vec![builtin_chains()[0].clone()];
+        let mut removed = Vec::new();
+        let err = remove_from_registry(&mut chains, &mut removed, "0x1").unwrap_err();
+        assert!(err.contains("last network"), "{err}");
+        assert_eq!(chains.len(), 1);
+        assert!(removed.is_empty());
+    }
+
+    /// Adding a deleted built-in back (by hand or via wallet_addEthereumChain)
+    /// clears its removed mark and makes it a built-in again, so the next load
+    /// treats it exactly like one.
+    #[test]
+    fn add_to_registry_restores_a_removed_builtin() {
+        let mut chains: Vec<ChainCfg> = builtin_chains()
+            .into_iter()
+            .filter(|c| c.id != "0x38" && c.id != "0x89")
+            .collect();
+        let mut removed = vec!["0x38".to_string(), "0x89".to_string()];
+
+        add_to_registry(&mut chains, &mut removed, custom_chain("0x38")).unwrap();
+        let bnb = chains.iter().find(|c| c.id == "0x38").unwrap();
+        assert!(bnb.builtin);
+        assert_eq!(bnb.name, "Custom 0x38", "the user's values are kept");
+        assert_eq!(removed, vec!["0x89".to_string()]);
+
+        add_to_registry(&mut chains, &mut removed, custom_chain("0x40d9")).unwrap();
+        assert!(!chains.last().unwrap().builtin);
+
+        let err = add_to_registry(&mut chains, &mut removed, custom_chain("0x40D9")).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
     }
 
     #[test]

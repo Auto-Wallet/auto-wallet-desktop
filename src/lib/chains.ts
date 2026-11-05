@@ -23,7 +23,7 @@ export type Chain = {
   color: string;
   /** Block explorer transaction URL base, e.g. https://etherscan.io/tx/. */
   explorerUrl?: string;
-  /** Built-in chains can be edited (rpc/name/symbol) but not removed. */
+  /** Ships with the app. Built-in and user chains can both be edited and removed. */
   builtin: boolean;
 };
 
