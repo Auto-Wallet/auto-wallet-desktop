@@ -116,16 +116,45 @@ The frontend onboarding/Settings flows are verified visually via a Chrome CDP ha
 
 ## Code signing policy
 
-Free code signing provided by SignPath.io, certificate by SignPath Foundation.
+Windows release builds are Authenticode-signed with an SSL.com Personal ID certificate (**CN=Lin Mo**) through [eSigner](https://www.ssl.com/esigner/) cloud signing. macOS release builds are signed and notarized with a Developer ID Application certificate. The release workflow is [`.github/workflows/release.yml`](.github/workflows/release.yml).
 
-Windows releases are built from this repository by [`.github/workflows/release.yml`](.github/workflows/release.yml) on a `v*` tag. The current published installer is `AutoDesktop_<version>_windows_x86_64_setup.exe` on the [GitHub Releases](https://github.com/Auto-Wallet/auto-wallet-desktop/releases) page (`auto-desktop` in older links is this same repository).
+Windows releases are built from this repository on a `v*` tag. The published installer is `AutoDesktop_<version>_windows_x86_64_setup.exe` on the [GitHub Releases](https://github.com/Auto-Wallet/auto-wallet-desktop/releases) page (`auto-desktop` in older links is this same repository).
+
+### Windows Authenticode (SSL.com eSigner)
+
+Signing uses [CodeSignTool](https://github.com/SSLcom/CodeSignTool) 1.3.2, the same build the official [`SSLcom/esigner-codesign`](https://github.com/SSLcom/esigner-codesign) action downloads. The release job passes Tauri a config overlay that sets `bundle.windows.signCommand` to [`scripts/sign-windows.ts`](scripts/sign-windows.ts). Tauri runs that command while it builds the NSIS installer, and writes the updater `.sig` afterwards, so the minisign signature matches the signed setup exe.
+
+CodeSignTool sends the file hash to SSL.com and timestamps the signature with `http://ts.ssl.com`. The workflow then checks the published Windows binaries with `Get-AuthenticodeSignature` and `signtool verify /pa`. The account password is passed as a Java argument, so it does not go through `cmd.exe`.
+
+A Windows release spends **three** eSigner signings:
+
+1. `auto-desktop.exe` packed inside the installer
+2. the NSIS setup exe
+3. `auto-desktop.exe` inside the portable zip
+
+NSIS plugin DLLs and `uninstall.exe` are left unsigned. The Personal ID monthly plan includes 20 signings, which covers about six Windows releases. The job builds `--bundles nsis` only.
+
+The overlay is applied when all four secrets below are present. A tag push without them (a fork, or this repository before the secrets are added) still produces the Windows artifacts, unsigned, and the job succeeds. Pull requests do not run the release workflow.
+
+Add these Actions secrets on the repository. Do not put the values in the workflow file:
+
+| Secret | Value |
+| --- | --- |
+| `ES_USERNAME` | SSL.com account username |
+| `ES_PASSWORD` | SSL.com account password |
+| `CREDENTIAL_ID` | eSigner signing credential ID |
+| `ES_TOTP_SECRET` | eSigner TOTP secret for the OTP app |
+
+Update files still use the existing `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets. That minisign key is separate from Authenticode.
+
+To test signing without publishing a release, open Actions → **Release** → **Run workflow**. Leave **Fail the run if the eSigner secrets are missing** checked. The run builds Windows only, signs when the four secrets are set, verifies the signatures, and uploads the `windows-x64` artifact. It does not create a GitHub Release. Publishing remains a `v*` tag.
 
 ### Team roles
 
 - Committers and reviewers: [Members team](https://github.com/orgs/Auto-Wallet/teams/members)
 - Approvers: [Owners](https://github.com/orgs/Auto-Wallet/people?query=role%3Aowner)
 
-Committers may change this repository without an extra review. Every change from someone who is not a committer is reviewed by a team member before it lands. A team member trusted by the whole team (an Approver) approves each request to code-sign a release.
+Committers may change this repository without an extra review. Every change from someone who is not a committer is reviewed by a team member before it lands. Pushing a `v*` tag builds the release and Authenticode-signs the Windows artifacts when the eSigner secrets are set.
 
 ### Privacy policy
 
