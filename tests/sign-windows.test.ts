@@ -14,6 +14,7 @@ import {
   releaseSignLogError,
   shouldAuthenticodeSign,
   signerSubjectError,
+  credentialInfoError,
   signingContextError,
   subjectFromCredentialInfo,
   updaterSignatureError,
@@ -306,20 +307,37 @@ test("release-windows.yml builds with the config bun writes, not a PowerShell-re
 
 // --- certificate check before any signing -------------------------------------
 
-test("the certificate subject is read from CodeSignTool credential_info output", () => {
-  const output = [
-    "Command: credential_info",
-    "Certificate Subject Information: ",
-    "- Subject DN: CN=Lin Mo, O=Lin Mo, L=Shanghai, C=CN",
-    "- Issuer DN: CN=SSL.com Code Signing Intermediate CA RSA R1, O=SSL Corp, C=US",
-    "- Certificate Expiry: 2027-11-01",
-    "credential_info command executed successfully",
-  ].join("\r\n");
-  expect(subjectFromCredentialInfo(output)).toBe("CN=Lin Mo, O=Lin Mo, L=Shanghai, C=CN");
-  expect(signerSubjectError(subjectFromCredentialInfo(output))).toBeNull();
+// Real stdout of `CodeSignTool credential_info` from the v0.2.88 Windows run.
+// CodeSignTool writes "credential_info command executed successfully" to its
+// log4j file only, never to the console; expecting it failed that run.
+const REAL_CREDENTIAL_INFO = [
+  "EVCS Certificate Subject Information: ",
+  "- Subject DN: CN=Lin Mo, O=Lin Mo, L=Linkou, ST=Heilongjiang, C=CN",
+  "- Certificate Expiry: Fri Nov 05 08:52:35 UTC 2027",
+  "- Issuer DN: CN=SSL.com Code Signing Intermediate CA RSA R1, O=SSL Corp, L=Houston, ST=Texas, C=US",
+  "",
+].join("\r\n");
 
+test("the certificate subject is read from CodeSignTool credential_info output", () => {
+  expect(subjectFromCredentialInfo(REAL_CREDENTIAL_INFO)).toBe(
+    "CN=Lin Mo, O=Lin Mo, L=Linkou, ST=Heilongjiang, C=CN",
+  );
   expect(subjectFromCredentialInfo("Subject DN: CN=Other, C=US\nIssuer DN: CN=Lin Mo")).toBe("CN=Other, C=US");
   expect(() => subjectFromCredentialInfo("Error: invalid credentials")).toThrow("no Subject DN");
+});
+
+test("real credential_info output for the Lin Mo certificate passes the check", () => {
+  expect(credentialInfoError(0, REAL_CREDENTIAL_INFO)).toBeNull();
+});
+
+test("credential_info fails on a non-zero exit, an error line, or another certificate", () => {
+  expect(credentialInfoError(1, REAL_CREDENTIAL_INFO)).toContain("exit 1");
+  expect(credentialInfoError(null, REAL_CREDENTIAL_INFO)).toContain("exit null");
+  // CodeSignTool reports errors on stdout and still exits 0.
+  expect(() => credentialInfoError(0, "Error: No credential ID found for this user\r\n")).toThrow("no Subject DN");
+  expect(credentialInfoError(0, REAL_CREDENTIAL_INFO.replace("CN=Lin Mo, O=", "CN=Someone Else, O="))).toContain(
+    "Someone Else",
+  );
 });
 
 test("the workflow checks the certificate before tauri build spends a signing", () => {

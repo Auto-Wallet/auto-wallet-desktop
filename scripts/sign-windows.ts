@@ -300,6 +300,15 @@ export function subjectFromCredentialInfo(output: string): string {
   return match[1]!;
 }
 
+// Decides whether credential_info proved the account and certificate are right.
+// CodeSignTool prints the certificate lines on stdout but writes its "executed
+// successfully" line only to its log4j file, and it exits 0 even after printing
+// "Error: ...". So the proof is a Subject DN on stdout whose CN is ours.
+export function credentialInfoError(status: number | null, output: string): string | null {
+  if (status !== 0) return `CodeSignTool credential_info failed (exit ${status})`;
+  return signerSubjectError(subjectFromCredentialInfo(output));
+}
+
 function checkCredential(env: Env): void {
   const missing = missingSigningSecrets(env);
   if (missing.length > 0) fail(`cannot check the eSigner credential: missing ${missing.join(", ")}`);
@@ -320,11 +329,8 @@ function checkCredential(env: Env): void {
   const shown = redact(raw, env);
   if (shown.trim()) console.log(shown.trim());
   if (result.error) fail(`could not start CodeSignTool: ${result.error.message}`);
-  if (result.status !== 0 || !/credential_info command executed successfully/i.test(raw)) {
-    fail(`CodeSignTool credential_info failed (exit ${result.status})`);
-  }
-  const subjectError = signerSubjectError(subjectFromCredentialInfo(raw));
-  if (subjectError) fail(subjectError);
+  const error = credentialInfoError(result.status, raw);
+  if (error) fail(error);
   console.log(`eSigner: credential OK, certificate is CN=${EXPECTED_SIGNER_CN}`);
 }
 
@@ -370,8 +376,11 @@ function signFile(filePath: string, env: Env): void {
     const combined = redact(raw, env);
     if (combined.trim()) console.log(combined.trim());
     if (result.error) fail(`could not start CodeSignTool: ${result.error.message}`);
-    // Match the tool's own success line before redaction. A secret that happens
-    // to be a substring of that line must not hide a successful sign.
+    // CodeSignTool exits 0 even after printing "Error: ...", so the exit code
+    // proves nothing. SignCommand prints "Code signed successfully: <path>" to
+    // stdout (System.out) right after sign() returns (checked in the v1.3.2
+    // bytecode). Match it before redaction: a secret that happens to be a
+    // substring of that line must not hide a successful sign.
     if (result.status !== 0 || !/code signed successfully/i.test(raw)) {
       fail(`CodeSignTool failed for ${filePath} (exit ${result.status})`);
     }
