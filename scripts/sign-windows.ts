@@ -1,29 +1,29 @@
-// Authenticode signing for the Windows release build.
+// Authenticode signing for the manual Windows release build
+// (.github/workflows/release-windows.yml).
 //
 // Tauri calls this once per file via bundle.windows.signCommand (%1 is the path).
 // SSL.com eSigner's monthly plan allows 20 signings, and Tauri also asks to sign
-// the NSIS plugin DLLs and the generated uninstaller. Those are skipped. A
-// release signs three files:
+// the NSIS plugin DLLs, resources and the generated uninstaller. Those are
+// skipped. A Windows build signs exactly two files:
 //   1. the patched auto-desktop.exe that NSIS embeds
 //   2. the NSIS setup exe (the updater artifact)
-//   3. the restored auto-desktop.exe that the portable zip ships
 // Each real signing waits out the previous TOTP window. eSigner rejects a reused
 // one-time password, and CodeSignTool mints the password at the start of a sign.
 //
-// CodeSignTool v1.3.2 (the build SSLcom/esigner-codesign downloads) timestamps
-// with the TSA_URL in its conf/code_sign_tool.properties (http://ts.ssl.com).
-// It writes the signed bytes to a separate directory; this script copies them
-// back onto the path Tauri is bundling so the updater minisign is taken of the
-// already-signed installer.
+// CodeSignTool v1.3.2 timestamps with the TSA_URL in its
+// conf/code_sign_tool.properties (http://ts.ssl.com). It writes the signed bytes
+// to a separate directory; this script copies them back onto the path Tauri is
+// bundling, so the updater minisign is taken of the already-signed installer.
 //
-// Secrets (all four required, otherwise the file is left unsigned):
-//   ES_USERNAME, ES_PASSWORD, CREDENTIAL_ID, ES_TOTP_SECRET
+// Signing never falls back to "unsigned". A file that should be signed fails
+// the build when any of ES_USERNAME, ES_PASSWORD, CREDENTIAL_ID, ES_TOTP_SECRET
+// is missing, or when it runs in GitHub Actions outside a manual
+// (workflow_dispatch) run, so no automatic trigger can spend the quota.
 // CODESIGNTOOL_DIR is the unzipped CodeSignTool-v1.3.2-windows directory.
-// ESIGNER_REQUIRED=true turns a missing secret or a failed sign into a hard
-// error. Without it, a missing secret exits 0 so a fork build still packages.
 // ESIGNER_SIGN_LOG, when set, receives one absolute path per signing.
 
 import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -42,65 +42,113 @@ export function fileName(filePath: string): string {
   return parts[parts.length - 1] ?? filePath;
 }
 
-// The app executable and the installers Tauri actually ships. Everything else
-// Tauri hands the sign command (NSIS plugin DLLs, uninstall.exe, WebView2
-// loaders) stays unsigned.
+// The app executable and the NSIS installer. Everything else Tauri hands the
+// sign command (NSIS plugin DLLs, the uninstaller temp file, resources) stays
+// unsigned.
 export function shouldAuthenticodeSign(filePath: string): boolean {
   const name = fileName(filePath);
   if (name.toLowerCase() === APP_EXE) return true;
-  if (/-setup\.exe$/i.test(name)) return true;
-  if (/\.msi$/i.test(name)) return true;
-  return false;
+  return /-setup\.exe$/i.test(name);
 }
 
-export function signingSecretsPresent(env: Env): boolean {
-  return SECRET_KEYS.every((key) => {
+export function missingSigningSecrets(env: Env): string[] {
+  return SECRET_KEYS.filter((key) => {
     const value = env[key];
-    return typeof value === "string" && value.length > 0;
+    return typeof value !== "string" || value.length === 0;
   });
 }
 
-export function signingRequired(env: Env): boolean {
-  return env.ESIGNER_REQUIRED === "true";
+// Windows signing is manual-only. In GitHub Actions, anything other than a
+// workflow_dispatch run (push, pull_request, schedule, tag) is refused before
+// CodeSignTool is touched.
+export function signingContextError(env: Env): string | null {
+  if (env.GITHUB_ACTIONS !== "true") return null;
+  if (env.GITHUB_EVENT_NAME === "workflow_dispatch") return null;
+  return `Windows signing runs only from a manual workflow_dispatch run, not from "${env.GITHUB_EVENT_NAME}"`;
 }
 
 export function delayBeforeNextSign(lastStartedAtMs: number | null, now: number, gapMs = OTP_GAP_MS): number {
-  if (lastStartedAtMs == null || !Number.isFinite(lastStartedAtMs)) return 0;
+  if (lastStartedAtMs === null) return 0;
   return Math.max(0, lastStartedAtMs + gapMs - now);
 }
 
-// A Windows release log is exactly: patched exe, NSIS setup, portable exe.
+// A Windows build log is exactly: patched app exe, then the NSIS setup.
 // Any other file means Tauri started asking for another signing and the
-// monthly quota would be spent without a decision.
+// monthly quota was spent without a decision.
 export function releaseSignLogError(lines: string[]): string | null {
   const files = lines.map((line) => line.trim()).filter((line) => line.length > 0);
   const names = files.map((file) => fileName(file).toLowerCase());
-  const expected = [APP_EXE, null, APP_EXE];
-  const setupOk = names.length === 3 && /-setup\.exe$/i.test(names[1] ?? "");
-  const exesOk = names.length === 3 && names[0] === expected[0] && names[2] === expected[2];
-  if (setupOk && exesOk) return null;
+  if (names.length === 2 && names[0] === APP_EXE && /-setup\.exe$/.test(names[1]!)) return null;
   const rendered = files.length > 0 ? files.join("\n") : "(empty)";
-  return `expected signed files in order: ${APP_EXE}, <product>-setup.exe, ${APP_EXE}\ngot:\n${rendered}`;
+  return `expected signed files in order: ${APP_EXE}, <product>-setup.exe\ngot:\n${rendered}`;
 }
 
 export function signerSubjectError(subject: string, expectedCn = EXPECTED_SIGNER_CN): string | null {
   const escaped = expectedCn.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`CN\\s*=\\s*"?${escaped}"?(?:,|$)`);
+  const pattern = new RegExp(`(?:^|,\\s*)CN\\s*=\\s*"?${escaped}"?\\s*(?:,|$)`);
   if (pattern.test(subject)) return null;
   return `expected signer CN=${expectedCn} but certificate subject is: ${subject}`;
 }
 
-export function updaterSignatureFreshnessError(
-  installerMtimeMs: number,
-  sigMtimeMs: number,
-  sigBytes: number,
-): string | null {
-  if (sigBytes <= 0) return "updater signature file is empty";
-  if (installerMtimeMs > sigMtimeMs) {
-    return "installer was modified after its updater signature was written";
+// --- Tauri updater (minisign) signature check --------------------------------
+// Tauri stores both the public key (tauri.conf.json plugins.updater.pubkey) and
+// each `<file>.sig` as base64 of a minisign text file. The signature is Ed25519
+// over BLAKE2b-512(file) ("ED", prehashed) or over the file itself ("Ed"), plus
+// a global Ed25519 signature over (signature || trusted comment).
+
+function decodeTauriText(base64: string): string[] {
+  return Buffer.from(base64.trim(), "base64").toString("utf8").split(/\r?\n/);
+}
+
+function decodeLine(line: string | undefined, what: string): Buffer {
+  if (!line) throw new Error(`${what}: missing line`);
+  return Buffer.from(line.trim(), "base64");
+}
+
+function ed25519Key(raw: Buffer): crypto.KeyObject {
+  return crypto.createPublicKey({
+    key: { kty: "OKP", crv: "Ed25519", x: raw.toString("base64url") },
+    format: "jwk",
+  });
+}
+
+export function updaterSignatureError(file: Buffer, sigBase64: string, pubkeyBase64: string): string | null {
+  const keyBytes = decodeLine(decodeTauriText(pubkeyBase64)[1], "public key");
+  if (keyBytes.length !== 42 || keyBytes.subarray(0, 2).toString("latin1") !== "Ed") {
+    return "public key is not a minisign Ed25519 key";
+  }
+  const keyId = keyBytes.subarray(2, 10);
+  const publicKey = ed25519Key(keyBytes.subarray(10));
+
+  const sigLines = decodeTauriText(sigBase64);
+  const sigBytes = decodeLine(sigLines[1], "signature");
+  if (sigBytes.length !== 74) return "signature has the wrong length";
+  const algorithm = sigBytes.subarray(0, 2).toString("latin1");
+  if (!sigBytes.subarray(2, 10).equals(keyId)) {
+    return "signature was made by a different key than the updater pubkey";
+  }
+  const signature = sigBytes.subarray(10);
+
+  let message: Buffer;
+  if (algorithm === "ED") message = crypto.createHash("blake2b512").update(file).digest();
+  else if (algorithm === "Ed") message = file;
+  else return `unknown signature algorithm ${JSON.stringify(algorithm)}`;
+  if (!crypto.verify(null, message, publicKey, signature)) {
+    return "signature does not match the file (was it changed after signing?)";
+  }
+
+  const trustedPrefix = "trusted comment: ";
+  const trustedLine = sigLines[2];
+  if (!trustedLine?.startsWith(trustedPrefix)) return "signature has no trusted comment";
+  const trustedComment = Buffer.from(trustedLine.slice(trustedPrefix.length), "utf8");
+  const globalSignature = decodeLine(sigLines[3], "global signature");
+  if (!crypto.verify(null, Buffer.concat([signature, trustedComment]), publicKey, globalSignature)) {
+    return "trusted comment signature is invalid";
   }
   return null;
 }
+
+// --- Authenticode -------------------------------------------------------------
 
 function sleepSync(ms: number): void {
   if (ms <= 0) return;
@@ -130,7 +178,8 @@ function reserveOtpSlot(env: Env): void {
   let last: number | null = null;
   if (fs.existsSync(stamp)) {
     const parsed = Number(fs.readFileSync(stamp, "utf8").trim());
-    last = Number.isFinite(parsed) ? parsed : null;
+    if (!Number.isFinite(parsed)) fail(`corrupt TOTP stamp file ${stamp}`);
+    last = parsed;
   }
   const wait = delayBeforeNextSign(last, Date.now());
   if (wait > 0) {
@@ -158,6 +207,8 @@ function findSignedCopy(outDir: string, originalName: string): string {
   throw new Error(`CodeSignTool wrote no ${originalName} in ${outDir} (${listing})`);
 }
 
+// Retries only a transient lock (antivirus or the bundler still holding the
+// file); the last error is rethrown.
 function replaceFile(from: string, to: string): void {
   let last: unknown;
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -296,21 +347,21 @@ function main(): void {
     if (!logPath) fail("--check-log needs a path");
     const error = releaseSignLogError(readLog(logPath));
     if (error) fail(error);
-    console.log(`eSigner: sign log has the three release files (${logPath})`);
+    console.log(`eSigner: sign log has exactly the two expected files (${logPath})`);
     return;
   }
 
-  if (argv[0] === "--check-updater-sig") {
-    const installer = argv[1];
-    if (!installer) fail("--check-updater-sig needs the installer path");
-    const sigPath = `${installer}.sig`;
-    if (!fs.existsSync(installer)) fail(`installer missing: ${installer}`);
+  if (argv[0] === "--verify-updater-sig") {
+    const [file, confPath] = argv.slice(1);
+    if (!file || !confPath) fail("usage: --verify-updater-sig <file> <tauri.conf.json>");
+    const sigPath = `${file}.sig`;
     if (!fs.existsSync(sigPath)) fail(`updater signature missing: ${sigPath}`);
-    const installerStat = fs.statSync(installer);
-    const sigStat = fs.statSync(sigPath);
-    const error = updaterSignatureFreshnessError(installerStat.mtimeMs, sigStat.mtimeMs, sigStat.size);
-    if (error) fail(`${error} (${sigPath})`);
-    console.log(`eSigner: updater signature ${sigPath} matches the signed installer`);
+    const conf = JSON.parse(fs.readFileSync(confPath, "utf8"));
+    const pubkey = conf.plugins.updater.pubkey;
+    if (typeof pubkey !== "string" || pubkey.length === 0) fail(`no plugins.updater.pubkey in ${confPath}`);
+    const error = updaterSignatureError(fs.readFileSync(file), fs.readFileSync(sigPath, "utf8"), pubkey);
+    if (error) fail(`${sigPath}: ${error}`);
+    console.log(`updater: ${sigPath} is a valid signature of ${file} by the app's updater key`);
     return;
   }
 
@@ -326,16 +377,16 @@ function main(): void {
   if (!filePath || filePath.startsWith("--")) fail("usage: bun scripts/sign-windows.ts <file>");
 
   if (!shouldAuthenticodeSign(filePath)) {
-    console.log(`eSigner: skip ${filePath} (not the app exe or an installer)`);
+    console.log(`eSigner: skip ${filePath} (not the app exe or the installer)`);
     return;
   }
 
-  if (!signingSecretsPresent(env)) {
-    if (signingRequired(env)) {
-      fail(`refusing to leave ${filePath} unsigned: set ES_USERNAME, ES_PASSWORD, CREDENTIAL_ID, and ES_TOTP_SECRET`);
-    }
-    console.log(`eSigner: secrets missing, leaving unsigned: ${filePath}`);
-    return;
+  const contextError = signingContextError(env);
+  if (contextError) fail(contextError);
+
+  const missing = missingSigningSecrets(env);
+  if (missing.length > 0) {
+    fail(`refusing to leave ${filePath} unsigned: missing ${missing.join(", ")}`);
   }
 
   signFile(filePath, env);

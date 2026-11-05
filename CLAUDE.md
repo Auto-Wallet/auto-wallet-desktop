@@ -66,6 +66,12 @@ remote URL) and the trustworthy-origin derivation — without a GUI. Notes:
   derive origins (e.g. `webview.url()`), never match them literally.
 - **`e2e-windows-experimental`** — tauri-driver/WebdriverIO scaffold in `e2e/wdio/` (Windows is the one
   platform where the official WebDriver path works). Manual workflow_dispatch, non-blocking; see its README.
+- **Windows packaging + Authenticode signing are manual only** — `release-windows.yml`
+  (`workflow_dispatch` on a `v*` tag, `windows-signing` environment). The SSL.com eSigner plan allows
+  20 signings a month and each build spends 2, so no push/tag/PR trigger may bundle Windows or sign.
+  CI Windows jobs build with `--no-bundle` only; `tests/sign-windows.test.ts` fails if another workflow
+  bundles on Windows or touches the eSigner secrets, and the sign script refuses non-dispatch runs.
+  See RELEASING.md.
 
 Windows-specific gotchas already fixed once:
 - **Any command that creates a webview/window (or may) MUST be `async`** (`open_dapp`,

@@ -1,0 +1,294 @@
+name: Release Windows
+
+# Manual only. Nothing triggers this workflow automatically: every Windows build
+# spends two of the 20 eSigner signings the SSL.com plan allows per month
+# (the app exe packed inside the installer, and the NSIS setup exe).
+#
+# Run it on a release tag whose GitHub Release already exists. Pushing the tag
+# runs release.yml, which publishes the macOS builds and latest.json:
+#   gh workflow run release-windows.yml --ref v0.2.87
+# (or Actions -> Release Windows -> Run workflow -> "Use workflow from": the tag)
+#
+# It builds the NSIS installer only (no portable zip), Authenticode-signs it
+# through Tauri's bundle.windows.signCommand (scripts/sign-windows.ts), verifies
+# the signatures and the updater minisign signature, then attaches
+# AutoDesktop_<ver>_windows_x86_64_setup.exe (+ .sig) to the release and adds the
+# windows-x86_64 entry to the release's latest.json.
+#
+# The eSigner secrets live in the `windows-signing` environment, which only `v*`
+# tags may deploy to and which needs a reviewer's approval.
+on:
+  workflow_dispatch:
+
+# Never cancel a run midway: a cancelled build may already have spent signings.
+concurrency:
+  group: release-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  BUN_VERSION: "1.3.14"
+  # Must equal CODESIGNTOOL_VERSION in scripts/sign-windows.ts (a test checks).
+  CODESIGNTOOL_VERSION: "1.3.2"
+  # SHA-256 of CodeSignTool-v1.3.2-windows.zip. The tool receives the eSigner
+  # password and TOTP secret, so a changed download must stop the run.
+  CODESIGNTOOL_SHA256: "4afc32e8b7f79bbe1de7e4e7049aaad4e0f754357613b9bbec0e3052f06fd36b"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Cheap checks before any signing is spent.
+  preflight:
+    name: Check tag and release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Tag, app version, and existing release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" != "tag" ] || [[ "$GITHUB_REF_NAME" != v* ]]; then
+            echo "::error::Run this workflow on a v* release tag, not ${GITHUB_REF_TYPE} '${GITHUB_REF_NAME}'."
+            exit 1
+          fi
+          VERSION="${GITHUB_REF_NAME#v}"
+          CONF_VERSION=$(node -p 'require("./src-tauri/tauri.conf.json").version')
+          if [ "$CONF_VERSION" != "$VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match tauri.conf.json version $CONF_VERSION."
+            exit 1
+          fi
+          ASSETS=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          if ! grep -qx 'latest.json' <<<"$ASSETS"; then
+            echo "::error::Release $GITHUB_REF_NAME has no latest.json yet. Wait for release.yml to publish it."
+            exit 1
+          fi
+          echo "Release $GITHUB_REF_NAME found; building Windows $VERSION."
+
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build + sign Windows (x64)
+    needs: preflight
+    runs-on: windows-latest
+    environment: windows-signing
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Bun
+        shell: bash
+        run: |
+          set -euxo pipefail
+          for i in 1 2 3 4 5; do
+            if npm install -g "bun@${BUN_VERSION}"; then
+              bun --version
+              exit 0
+            fi
+            sleep $((i * 10))
+          done
+          exit 1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bun install
+
+      - name: Require eSigner secrets
+        shell: bash
+        env:
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          CREDENTIAL_ID: ${{ secrets.CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "$ES_USERNAME" ] || missing+=(ES_USERNAME)
+          [ -n "$ES_PASSWORD" ] || missing+=(ES_PASSWORD)
+          [ -n "$CREDENTIAL_ID" ] || missing+=(CREDENTIAL_ID)
+          [ -n "$ES_TOTP_SECRET" ] || missing+=(ES_TOTP_SECRET)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing eSigner secrets in the windows-signing environment: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Install CodeSignTool (pinned SHA-256)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:CODESIGNTOOL_VERSION
+          $url = "https://github.com/SSLcom/CodeSignTool/releases/download/v$version/CodeSignTool-v$version-windows.zip"
+          $dest = Join-Path $env:RUNNER_TEMP 'CodeSignTool'
+          $zip = Join-Path $env:RUNNER_TEMP 'CodeSignTool.zip'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $downloaded = $false
+          foreach ($try in 1..5) {
+            Write-Host "Downloading CodeSignTool $version (attempt $try)"
+            & curl.exe -fL --retry 3 --retry-delay 2 -o $zip $url
+            if ($LASTEXITCODE -eq 0) { $downloaded = $true; break }
+            Start-Sleep -Seconds ($try * 5)
+          }
+          if (-not $downloaded) { throw "Failed to download CodeSignTool $version" }
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          if ($hash -ne $env:CODESIGNTOOL_SHA256) {
+            throw "CodeSignTool zip SHA-256 is $hash, expected $env:CODESIGNTOOL_SHA256"
+          }
+          tar.exe -xf $zip -C $dest
+          $java = Join-Path $dest 'jdk-11.0.2\bin\java.exe'
+          $jar = Join-Path $dest "jar\code_sign_tool-$version.jar"
+          if (-not (Test-Path -LiteralPath $java)) { throw "Missing $java" }
+          if (-not (Test-Path -LiteralPath $jar)) { throw "Missing $jar" }
+          Add-Content -Path $env:GITHUB_ENV -Value "CODESIGNTOOL_DIR=$dest"
+          Add-Content -Path $env:GITHUB_ENV -Value "ESIGNER_SIGN_LOG=$env:RUNNER_TEMP\esigner-signed.txt"
+          Write-Host "CodeSignTool $version ready (SHA-256 verified)"
+
+      # tauri build chdirs into src-tauri before bundling, so the sign command
+      # uses absolute paths. It is applied only for this build, via Tauri's
+      # config merge, and sets bundle.windows.signCommand.
+      - name: Configure Tauri signCommand
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Prefer bun.exe. The npm global shim is bun.cmd, which Tauri can
+          # launch as well; either absolute path keeps the NSIS uninstaller
+          # hook from depending on PATH.
+          $bunCmd = Get-Command bun -ErrorAction Stop
+          $bun = $bunCmd.Source
+          $bunExe = Get-Command bun.exe -ErrorAction SilentlyContinue
+          if ($bunExe) { $bun = $bunExe.Source }
+          $bun = (Resolve-Path -LiteralPath $bun).Path
+          $script = (Resolve-Path -LiteralPath 'scripts\sign-windows.ts').Path
+          function Escape-Json([string]$value) {
+            return $value.Replace('\', '\\').Replace('"', '\"')
+          }
+          $configPath = Join-Path $env:RUNNER_TEMP 'windows-sign.json'
+          $json = @"
+          {
+            "bundle": {
+              "windows": {
+                "signCommand": {
+                  "cmd": "$(Escape-Json $bun)",
+                  "args": ["$(Escape-Json $script)", "%1"]
+                }
+              }
+            }
+          }
+          "@
+          $utf8 = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::WriteAllText($configPath, $json.Trim(), $utf8)
+          Add-Content -Path $env:GITHUB_ENV -Value "TAURI_WINDOWS_SIGN_CONFIG=$configPath"
+          Write-Host "signCommand cmd: $bun"
+          Write-Host "signCommand script: $script"
+
+      - name: Build + sign NSIS installer
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}
+          ZERION_API_KEY: ${{ secrets.ZERION_API_KEY }}
+          DEBANK_APIKEY: ${{ secrets.DEBANK_APIKEY }}
+          PUBLIC_NODE_KEY: ${{ secrets.PUBLIC_NODE_KEY }}
+          RELAY_API_KEY: ${{ secrets.RELAY_API_KEY }}
+          OKX_API_KEY: ${{ secrets.OKX_API_KEY }}
+          OKX_SECRET_KEY: ${{ secrets.OKX_SECRET_KEY }}
+          OKX_PASSPHRASE: ${{ secrets.OKX_PASSPHRASE }}
+          ES_USERNAME: ${{ secrets.ES_USERNAME }}
+          ES_PASSWORD: ${{ secrets.ES_PASSWORD }}
+          CREDENTIAL_ID: ${{ secrets.CREDENTIAL_ID }}
+          ES_TOTP_SECRET: ${{ secrets.ES_TOTP_SECRET }}
+        run: |
+          set -euo pipefail
+          # Tauri calls signCommand for the patched app exe, the NSIS plugin
+          # DLLs and the uninstaller (both skipped by the script), then the
+          # setup exe. It writes <setup>.exe.sig after that, so the updater
+          # signature covers the signed installer.
+          bun run tauri build --bundles nsis --config "$TAURI_WINDOWS_SIGN_CONFIG"
+
+      - name: Verify signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          installers=(src-tauri/target/release/bundle/nsis/*-setup.exe)
+          if [ "${#installers[@]}" -ne 1 ]; then
+            echo "::error::expected one NSIS installer, found ${#installers[@]}"
+            exit 1
+          fi
+          INSTALLER=${installers[0]}
+          bun scripts/sign-windows.ts --check-log "$ESIGNER_SIGN_LOG"
+          bun scripts/sign-windows.ts --verify "$INSTALLER"
+          bun scripts/sign-windows.ts --verify-updater-sig "$INSTALLER" src-tauri/tauri.conf.json
+
+      - name: Stage installer
+        shell: bash
+        run: |
+          set -euxo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          ASSET="AutoDesktop_${VERSION}_windows_x86_64_setup.exe"
+          INSTALLER=$(ls src-tauri/target/release/bundle/nsis/*-setup.exe)
+          mkdir -p dist
+          cp "$INSTALLER" "dist/$ASSET"
+          cp "$INSTALLER.sig" "dist/$ASSET.sig"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: windows-x64
+          path: dist/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # No signing secrets here; only this job may write to the release.
+  publish:
+    name: Attach to GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: windows-x64
+          path: dist
+
+      - name: Upload installer and update latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          VERSION="${TAG#v}"
+          ASSET="AutoDesktop_${VERSION}_windows_x86_64_setup.exe"
+          test -f "dist/$ASSET"
+          test -f "dist/$ASSET.sig"
+          mkdir -p manifest
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern latest.json --dir manifest
+          VERSION="$VERSION" TAG="$TAG" ASSET="$ASSET" node -e '
+            const fs = require("fs");
+            const { VERSION, TAG, ASSET, GITHUB_REPOSITORY } = process.env;
+            const manifest = JSON.parse(fs.readFileSync("manifest/latest.json", "utf8"));
+            if (manifest.version !== VERSION) {
+              throw new Error(`latest.json is for ${manifest.version}, not ${VERSION}`);
+            }
+            manifest.platforms["windows-x86_64"] = {
+              signature: fs.readFileSync(`dist/${ASSET}.sig`, "utf8").trim(),
+              url: `https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ASSET}`,
+            };
+            fs.writeFileSync("manifest/latest.json", JSON.stringify(manifest, null, 2));
+          '
+          # Installer first, manifest last: clients only see the Windows entry
+          # once the file it points to is downloadable.
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "dist/$ASSET" "dist/$ASSET.sig"
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber manifest/latest.json
+          cat manifest/latest.json

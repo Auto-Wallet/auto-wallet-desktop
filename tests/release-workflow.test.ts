@@ -1,36 +1,45 @@
 import { expect, test } from "bun:test";
 
-const workflow = await Bun.file(".github/workflows/release.yml").text();
+const workflows = {
+  release: await Bun.file(".github/workflows/release.yml").text(),
+  windows: await Bun.file(".github/workflows/release-windows.yml").text(),
+};
+const workflow = workflows.release;
 
-function releaseStep(name: string): string {
+function stepIn(text: string, name: string): string {
   const marker = `      - name: ${name}`;
-  const start = workflow.indexOf(marker);
+  const start = text.indexOf(marker);
   if (start < 0) throw new Error(`Release step not found: ${name}`);
-  const next = workflow.indexOf("\n      - name:", start + marker.length);
-  return next < 0 ? workflow.slice(start) : workflow.slice(start, next);
+  const next = text.indexOf("\n      - name:", start + marker.length);
+  return next < 0 ? text.slice(start) : text.slice(start, next);
 }
 
-const BUILD_STEPS = [
-  "Build signed + notarized macOS bundles",
-  "Build executable + NSIS updater installer",
+function releaseStep(name: string): string {
+  return stepIn(workflow, name);
+}
+
+// macOS builds on the tag push; Windows only in the manual release-windows.yml.
+const BUILD_STEPS: [string, keyof typeof workflows][] = [
+  ["Build signed + notarized macOS bundles", "release"],
+  ["Build + sign NSIS installer", "windows"],
 ];
 
-test.each(BUILD_STEPS)("%s receives the Relay API key", (stepName) => {
-  expect(releaseStep(stepName)).toContain(
+test.each(BUILD_STEPS)("%s receives the Relay API key", (stepName, file) => {
+  expect(stepIn(workflows[file], stepName)).toContain(
     "RELAY_API_KEY: ${{ secrets.RELAY_API_KEY }}",
   );
 });
 
-test.each(BUILD_STEPS)("%s receives the DeBank API key", (stepName) => {
-  expect(releaseStep(stepName)).toContain(
+test.each(BUILD_STEPS)("%s receives the DeBank API key", (stepName, file) => {
+  expect(stepIn(workflows[file], stepName)).toContain(
     "DEBANK_APIKEY: ${{ secrets.DEBANK_APIKEY }}",
   );
 });
 
 // Without it, `option_env!("PUBLIC_NODE_KEY")` compiles to None and every shipped
 // build talks to PublicNode unauthenticated.
-test.each(BUILD_STEPS)("%s receives the PublicNode RPC key", (stepName) => {
-  expect(releaseStep(stepName)).toContain(
+test.each(BUILD_STEPS)("%s receives the PublicNode RPC key", (stepName, file) => {
+  expect(stepIn(workflows[file], stepName)).toContain(
     "PUBLIC_NODE_KEY: ${{ secrets.PUBLIC_NODE_KEY }}",
   );
 });

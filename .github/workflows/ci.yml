@@ -113,7 +113,7 @@ jobs:
         shell: bash
         run: bunx tsc --noEmit
 
-      - name: Windows signing policy tests
+      - name: Signing policy tests (never signs or spends eSigner quota)
         shell: bash
         run: bun test tests/sign-windows.test.ts
 
