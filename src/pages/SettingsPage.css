@@ -32,6 +32,12 @@
   box-shadow: var(--sh-sm);
   overflow: hidden;
 }
+.set-card-scroll {
+  max-height: 336px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
 .set-row {
   display: flex;
   align-items: center;
@@ -112,12 +118,6 @@ button.set-row:hover {
 .network-search .input {
   width: 100%;
   padding-left: 39px;
-}
-.network-list {
-  max-height: 336px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
 }
 .chain-row {
   display: flex;

@@ -329,7 +329,7 @@ export default function SettingsPage() {
                 <Icon name="plus" size={16} /> {t("settings.addNetwork")}
               </button>
             </div>
-            <div className="set-card network-list scroll">
+            <div className="set-card set-card-scroll scroll">
               {visibleChains.map((c) => {
                 const on = c.id.toLowerCase() === activeChain.toLowerCase();
                 return (
@@ -622,7 +622,7 @@ export default function SettingsPage() {
               </h2>
               <p>{t("settings.connectedSitesHint")}</p>
             </div>
-            <div className="set-card">
+            <div className="set-card set-card-scroll scroll">
               {connectedSites.length === 0 ? (
                 <div className="set-row">
                   <div className="gr">
