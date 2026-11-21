@@ -21,6 +21,21 @@ description = "Allow the trusted shell to read OKX trading and funding assets."
 commands.allow = ["okx_get_assets"]
 
 [[permission]]
+identifier = "allow-okx-get-savings"
+description = "Allow the trusted shell to read OKX Simple Earn Flexible balances and rates."
+commands.allow = ["okx_get_savings"]
+
+[[permission]]
+identifier = "allow-okx-get-flexible-loans"
+description = "Allow the trusted shell to read OKX Flexible Loan orders and risk."
+commands.allow = ["okx_get_flexible_loans"]
+
+[[permission]]
+identifier = "allow-okx-get-flexible-loan-interest"
+description = "Allow the trusted shell to read OKX Flexible Loan interest and rates."
+commands.allow = ["okx_get_flexible_loan_interest"]
+
+[[permission]]
 identifier = "allow-okx-get-dcd-orders"
 description = "Allow the trusted shell to read OKX Dual Investment orders."
 commands.allow = ["okx_get_dcd_orders"]

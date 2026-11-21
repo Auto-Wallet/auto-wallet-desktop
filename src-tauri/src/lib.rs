@@ -50,7 +50,8 @@ use native_menu::{DEBUG_DAPP_CONSOLE_MENU_ID, DEBUG_SHELL_CONSOLE_MENU_ID};
 use relay::{relay_chains, relay_quote, relay_status};
 use okx_account::{
     okx_connection_status, okx_delete_credentials, okx_get_assets, okx_get_dcd_index_prices,
-    okx_get_dcd_orders, okx_save_credentials, okx_save_dcd_csv,
+    okx_get_dcd_orders, okx_get_flexible_loan_interest, okx_get_flexible_loans, okx_get_savings,
+    okx_save_credentials, okx_save_dcd_csv,
 };
 
 const DEFI_PROVIDER_TIMEOUT: Duration = Duration::from_secs(12);
@@ -8698,6 +8699,9 @@ pub fn run() {
             okx_save_credentials,
             okx_delete_credentials,
             okx_get_assets,
+            okx_get_flexible_loans,
+            okx_get_flexible_loan_interest,
+            okx_get_savings,
             okx_get_dcd_index_prices,
             okx_get_dcd_orders,
             okx_save_dcd_csv,
@@ -10743,6 +10747,9 @@ mod e2e {
                 okx_save_credentials,
                 okx_delete_credentials,
                 okx_get_assets,
+                okx_get_flexible_loans,
+                okx_get_flexible_loan_interest,
+                okx_get_savings,
                 okx_get_dcd_orders,
             okx_save_dcd_csv,
                 set_active_chain,
@@ -12776,6 +12783,9 @@ mod e2e {
             ),
             ("okx_delete_credentials", json!({})),
             ("okx_get_assets", json!({})),
+            ("okx_get_flexible_loans", json!({})),
+            ("okx_get_flexible_loan_interest", json!({ "orderIds": ["123"] })),
+            ("okx_get_savings", json!({})),
             (
                 "okx_get_dcd_index_prices",
                 json!({ "instrumentIds": ["BTC-USDC"] }),

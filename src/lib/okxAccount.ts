@@ -1,5 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
-import { isTauri } from "./platform";
+import { array, okxInvoke, optionalString, parseEnvelope, record, string, timestamp } from "./okxResponse";
+import type { OkxSaving } from "./okxFinance";
 
 export type OkxRegion = "global" | "us" | "eu" | "tr";
 
@@ -27,9 +27,19 @@ export type OkxPortfolioAsset = {
   accounts: ("trading" | "funding" | "earn")[];
   currency: string;
   balance: string;
-  available: string;
-  frozen: string;
+  available: string | null;
+  frozen: string | null;
   usdValue: string | null;
+};
+
+export type OkxTradingBalance = {
+  currency: string;
+  spotBalance: string | null;
+  cashBalance: string | null;
+  available: string | null;
+  frozen: string | null;
+  liability: string | null;
+  interest: string | null;
 };
 
 export type OkxAssets = {
@@ -41,6 +51,7 @@ export type OkxAssets = {
     earn: string;
   };
   assets: OkxAsset[];
+  tradingBalances: OkxTradingBalance[];
 };
 
 export type OkxDcdOrderState =
@@ -78,8 +89,6 @@ export type OkxIndexPrice = {
   updatedAt: number;
 };
 
-type JsonRecord = Record<string, unknown>;
-
 const REGIONS = new Set<OkxRegion>(["global", "us", "eu", "tr"]);
 const ORDER_STATES = new Set<OkxDcdOrderState>([
   "initial",
@@ -108,53 +117,14 @@ export function createSingleFlight<T>(operation: () => Promise<T>): () => Promis
   };
 }
 
-function record(value: unknown, label: string): JsonRecord {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`);
-  }
-  return value as JsonRecord;
-}
-
-function array(value: unknown, label: string): unknown[] {
-  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
-  return value;
-}
-
-function string(value: unknown, label: string): string {
-  if (typeof value !== "string") throw new Error(`${label} must be a string`);
-  return value;
-}
-
-function optionalString(value: unknown, label: string): string | null {
-  if (value === undefined || value === null || value === "") return null;
-  return string(value, label);
-}
-
 function availableAmount(value: unknown, label: string): string {
   const amount = string(value, label);
   return amount === "" ? "0" : amount;
 }
 
-function timestamp(value: unknown, label: string): number {
-  const raw = string(value, label);
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) throw new Error(`${label} is invalid`);
-  return parsed;
-}
-
 function optionalTimestamp(value: unknown, label: string): number | null {
   if (value === undefined || value === null || value === "") return null;
   return timestamp(value, label);
-}
-
-function parseEnvelope(value: unknown, label: string): unknown[] {
-  const envelope = record(value, label);
-  const code = string(envelope.code, `${label}.code`);
-  if (code !== "0") {
-    const message = string(envelope.msg, `${label}.msg`);
-    throw new Error(`OKX API ${code}: ${message}`);
-  }
-  return array(envelope.data, `${label}.data`);
 }
 
 function parseOptionalCodeEnvelope(value: unknown, label: string): unknown[] {
@@ -234,6 +204,19 @@ export function parseOkxAssets(value: unknown): OkxAssets {
       earn: string(accountValues.earn, "OKX account valuation summary.details.earn"),
     },
     assets: [...trading, ...funding],
+    tradingBalances: details.map((value, index) => {
+      const label = `OKX trading asset ${index}`;
+      const item = record(value, label);
+      return {
+        currency: string(item.ccy, `${label}.ccy`),
+        spotBalance: optionalString(item.spotBal, `${label}.spotBal`),
+        cashBalance: optionalString(item.cashBal, `${label}.cashBal`),
+        available: optionalString(item.availBal, `${label}.availBal`),
+        frozen: optionalString(item.frozenBal, `${label}.frozenBal`),
+        liability: optionalString(item.liab, `${label}.liab`),
+        interest: optionalString(item.interest, `${label}.interest`),
+      };
+    }),
   };
 }
 
@@ -319,11 +302,6 @@ export function getOkxDcdIndexInstrumentId(productId: string): string {
       : baseCurrency;
   const indexQuoteCurrency = quoteCurrency === "USDG" ? "USD" : quoteCurrency;
   return `${indexBaseCurrency}-${indexQuoteCurrency}`;
-}
-
-async function okxInvoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
-  if (!isTauri()) throw new Error("OKX account access is available in the desktop app.");
-  return invoke<T>(command, args);
 }
 
 export async function getOkxConnectionStatus(): Promise<OkxConnectionStatus> {
@@ -588,10 +566,11 @@ export function calculateOkxDcdRealizedApr(
 }
 
 export function mergeOkxPortfolioAssets(
-  assets: OkxAssets,
+  assets: Pick<OkxAssets, "assets">,
   orders: OkxDcdOrder[],
+  savings: OkxSaving[] = [],
 ): OkxPortfolioAsset[] {
-  const portfolio = new Map<string, OkxPortfolioAsset>();
+  const portfolio = new Map<string, OkxPortfolioAsset & { available: string; frozen: string }>();
 
   for (const asset of assets.assets) {
     const existing = portfolio.get(asset.currency);
@@ -645,5 +624,25 @@ export function mergeOkxPortfolioAssets(
     existing.usdValue = null;
   }
 
-  return [...portfolio.values()];
+  const savingsOnly: OkxPortfolioAsset[] = [];
+  for (const saving of savings) {
+    if (Number(saving.balance) === 0) continue;
+    const existing = portfolio.get(saving.currency);
+    if (existing === undefined) {
+      savingsOnly.push({
+        accounts: ["earn"],
+        currency: saving.currency,
+        balance: saving.balance,
+        available: null,
+        frozen: null,
+        usdValue: null,
+      });
+      continue;
+    }
+    if (!existing.accounts.includes("earn")) existing.accounts.push("earn");
+    existing.balance = addDecimalStrings(existing.balance, saving.balance, `${saving.currency} balance`);
+    existing.usdValue = null;
+  }
+
+  return [...portfolio.values(), ...savingsOnly];
 }

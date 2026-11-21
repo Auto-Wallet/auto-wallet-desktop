@@ -1,5 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import "./OkxPage.css";
+import { Coin, EmptyState, InlineError, TableSkeleton, formatCurrencyAmount, formatDate, formatMoney } from "./OkxDisplay";
+import { FlexibleLoanSection, SavingsTable, TradingBalanceTable } from "./OkxFinance";
 import { saveOkxDcdCsv } from "../lib/okxCsv";
 import { askConfirm } from "../lib/confirm";
 import { Icon } from "../lib/icons";
@@ -29,6 +31,7 @@ import {
   type OkxPortfolioAsset,
   type OkxRegion,
 } from "../lib/okxAccount";
+import { getOkxFlexibleLoanRates, getOkxFlexibleLoans, getOkxSavings, type OkxFlexibleLoans, type OkxLoanRates, type OkxSavings } from "../lib/okxFinance";
 import { openExternalUrl } from "../lib/platform";
 
 const API_KEY_URL = "https://www.okx.com/account/my-api";
@@ -56,25 +59,6 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
-function formatMoney(value: string): string {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return value;
-  return new Intl.NumberFormat(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(number);
-}
-
-function formatCurrencyAmount(value: string, currency: string): string {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return value;
-  const fractionDigits = isUsdStablecoin(currency) ? 2 : 6;
-  return new Intl.NumberFormat(undefined, {
-    minimumFractionDigits: fractionDigits,
-    maximumFractionDigits: fractionDigits,
-  }).format(number);
-}
-
 function signedAmount(value: string, formatted: string): string {
   return Number(value) > 0 ? `+${formatted}` : formatted;
 }
@@ -98,22 +82,42 @@ function formatYield(value: string): string {
   return `${(number * 100).toFixed(2)}%`;
 }
 
-function formatDate(value: number): string {
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
-}
-
 export default function OkxPage() {
-  const { t } = useT();
   const [status, setStatus] = useState<OkxConnectionStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    getOkxConnectionStatus().then((next) => {
+      if (active) setStatus(next);
+    }, (error) => {
+      if (active) setStatusError(errorMessage(error));
+    });
+    return () => { active = false; };
+  }, []);
+
+  if (statusError !== null) return <PageError message={statusError} />;
+  if (status === null) return <div className="okx-page okx-loading"><span /><span /><span /></div>;
+  if (!status.configured) return <OkxSetup onConnected={setStatus} />;
+
+  return <ConnectedOkxPage status={status} onDisconnected={() => {
+    setStatus({ configured: false, apiKeyHint: null, region: null });
+  }} />;
+}
+
+function ConnectedOkxPage({ status, onDisconnected }: {
+  status: Extract<OkxConnectionStatus, { configured: true }>;
+  onDisconnected: () => void;
+}) {
+  const { t } = useT();
   const [assets, setAssets] = useState<OkxAssets | null>(null);
   const [assetsError, setAssetsError] = useState<string | null>(null);
+  const [savings, setSavings] = useState<OkxSavings | null>(null);
+  const [savingsError, setSavingsError] = useState<string | null>(null);
+  const [loans, setLoans] = useState<OkxFlexibleLoans | null>(null);
+  const [loansError, setLoansError] = useState<string | null>(null);
+  const [loanRates, setLoanRates] = useState<OkxLoanRates | null>(null);
+  const [loanRatesError, setLoanRatesError] = useState<string | null>(null);
   const [orders, setOrders] = useState<OkxDcdOrder[] | null>(null);
   const [ordersError, setOrdersError] = useState<string | null>(null);
   const [indexPrices, setIndexPrices] = useState<OkxIndexPrice[] | null>(null);
@@ -121,10 +125,14 @@ export default function OkxPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [showAllOrders, setShowAllOrders] = useState(true);
   const [showConnection, setShowConnection] = useState(false);
+  const [disconnectError, setDisconnectError] = useState<string | null>(null);
 
   const refreshData = useMemo(() => createSingleFlight(() => {
     setRefreshing(true);
     setAssetsError(null);
+    setSavingsError(null);
+    setLoansError(null);
+    setLoanRatesError(null);
     setOrdersError(null);
     setPriceError(null);
     setIndexPrices(null);
@@ -136,36 +144,28 @@ export default function OkxPage() {
       const instrumentIds = Array.from(new Set(nextOrders.map((order) => (
         getOkxDcdIndexInstrumentId(order.productId)
       ))));
-      return getOkxDcdIndexPrices(instrumentIds).then(setIndexPrices);
+      return getOkxDcdIndexPrices(instrumentIds);
     });
-    return Promise.allSettled([
-      getOkxAssets().then(setAssets),
-      ordersRequest,
-      pricesRequest,
-    ]).then((results) => {
-      if (results[0].status === "rejected") setAssetsError(errorMessage(results[0].reason));
-      if (results[1].status === "rejected") setOrdersError(errorMessage(results[1].reason));
-      if (results[1].status === "fulfilled" && results[2].status === "rejected") {
-        setPriceError(errorMessage(results[2].reason));
-      }
+    const loanRequest = getOkxFlexibleLoans().then((nextLoans) => {
+      setLoans(nextLoans);
+      setLoanRates(null);
+      return getOkxFlexibleLoanRates(nextLoans.orders.map((loan) => loan.orderId)).then(
+        setLoanRates, (error) => setLoanRatesError(errorMessage(error)),
+      );
+    }, (error) => setLoansError(errorMessage(error)));
+    return Promise.all([
+      getOkxAssets().then(setAssets, (error) => setAssetsError(errorMessage(error))),
+      getOkxSavings().then(setSavings, (error) => setSavingsError(errorMessage(error))),
+      loanRequest,
+      ordersRequest.catch((error) => setOrdersError(errorMessage(error))),
+      pricesRequest.then(setIndexPrices, (error) => setPriceError(errorMessage(error))),
+    ]).then(() => {
       setRefreshing(false);
     });
   }), []);
 
   useEffect(() => {
-    let active = true;
-    getOkxConnectionStatus()
-      .then((next) => {
-        if (!active) return;
-        setStatus(next);
-        if (next.configured) void refreshData();
-      })
-      .catch((error) => {
-        if (active) setStatusError(errorMessage(error));
-      });
-    return () => {
-      active = false;
-    };
+    void refreshData();
   }, [refreshData]);
 
   const visibleOrders = useMemo(() => {
@@ -173,26 +173,8 @@ export default function OkxPage() {
     return showAllOrders ? orders : orders.filter(isCurrentDcdOrder);
   }, [orders, showAllOrders]);
 
-  const portfolioAssets = useMemo(() => {
-    if (assets === null) return null;
-    if (orders === null) return mergeOkxPortfolioAssets(assets, []);
-    return mergeOkxPortfolioAssets(assets, orders);
-  }, [assets, orders]);
-
-  if (statusError !== null) {
-    return <PageError message={statusError} />;
-  }
-  if (status === null) {
-    return <div className="okx-page okx-loading"><span /><span /><span /></div>;
-  }
-  if (!status.configured) {
-    return <OkxSetup onConnected={(next) => {
-      setStatus(next);
-      void refreshData();
-    }} />;
-  }
-
   const disconnect = () => {
+    setDisconnectError(null);
     void askConfirm({
       title: t("okx.disconnectTitle"),
       message: t("okx.disconnectHint"),
@@ -201,13 +183,9 @@ export default function OkxPage() {
       danger: true,
     }).then((approved) => {
       if (!approved) return;
-      void deleteOkxCredentials().then(() => {
-        setAssets(null);
-        setOrders(null);
-        setIndexPrices(null);
-        setShowConnection(false);
-        setStatus({ configured: false, apiKeyHint: null, region: null });
-      });
+      return deleteOkxCredentials().then(onDisconnected);
+    }).catch((error) => {
+      setDisconnectError(errorMessage(error));
     });
   };
 
@@ -236,6 +214,7 @@ export default function OkxPage() {
           <div>
             <strong>{t("okx.connection")}</strong>
             <span>{status.apiKeyHint} · {regionLabel(status.region)}</span>
+            {disconnectError !== null && <InlineError message={disconnectError} />}
           </div>
           <button className="okx-danger-link" onClick={disconnect}>{t("okx.disconnect")}</button>
         </section>
@@ -267,16 +246,10 @@ export default function OkxPage() {
         </div>
       </section>
 
-      <section className="okx-section">
-        <div className="okx-section-head">
-          <div>
-            <h2>{t("okx.assets")}</h2>
-            <p>{t("okx.assetsHint")}</p>
-          </div>
-          {portfolioAssets !== null && <span className="okx-count">{portfolioAssets.length}</span>}
-        </div>
-        {assetsError !== null ? <InlineError message={assetsError} /> : <AssetTable assets={portfolioAssets} />}
-      </section>
+      <FlexibleLoanSection loans={loans} loanRates={loanRates} rateError={loanRatesError} error={loansError} />
+
+      <AccountBalances assets={assets} assetsError={assetsError} savings={savings} savingsError={savingsError}
+        orders={orders} ordersError={ordersError} />
 
       <section className="okx-section okx-orders-section">
         <div className="okx-section-head">
@@ -376,6 +349,65 @@ function OkxSetup({ onConnected }: { onConnected: (status: OkxConnectionStatus) 
   );
 }
 
+const BALANCE_VIEWS = ["combined", "trading", "funding", "earn"] as const;
+
+function AccountBalances({ assets, assetsError, savings, savingsError, orders, ordersError }: {
+  assets: OkxAssets | null;
+  assetsError: string | null;
+  savings: OkxSavings | null;
+  savingsError: string | null;
+  orders: OkxDcdOrder[] | null;
+  ordersError: string | null;
+}) {
+  const { t } = useT();
+  const [view, setView] = useState<(typeof BALANCE_VIEWS)[number]>("combined");
+  const combined = useMemo(() => assets === null ? null : mergeOkxPortfolioAssets(
+    assets,
+    orders === null || ordersError !== null ? [] : orders,
+    savings === null || savingsError !== null ? [] : savings.balances,
+  ), [assets, orders, ordersError, savings, savingsError]);
+  const funding = useMemo(() => assets === null ? null : mergeOkxPortfolioAssets({
+    assets: assets.assets.filter((row) => row.account === "funding"),
+  }, []), [assets]);
+  const dualInvestment = useMemo(() => orders === null ? null : mergeOkxPortfolioAssets({ assets: [] }, orders), [orders]);
+
+  return (
+    <section className="okx-section">
+      <div className="okx-section-head">
+        <div>
+          <h2>{t("okx.assets")}</h2>
+          <p>{t(`okx.balanceHint.${view}`)}</p>
+        </div>
+        <div className="okx-segmented okx-account-switcher" role="group" aria-label={t("okx.account")}>
+          {BALANCE_VIEWS.map((item) => (
+            <button key={item} type="button" className={item === view ? "on" : ""} aria-pressed={item === view}
+              onClick={() => setView(item)}>{t(`okx.account.${item}`)}</button>
+          ))}
+        </div>
+      </div>
+      {view === "earn" ? (
+        <>
+          <div className="okx-balance-subhead"><h3>{t("okx.simpleEarn")}</h3><p>{t("okx.simpleEarnHint")}</p></div>
+          <SavingsTable savings={savings} error={savingsError} />
+          <div className="okx-balance-subhead"><h3>{t("okx.dualInvestmentBalance")}</h3></div>
+          {ordersError !== null ? <DcdError message={ordersError} /> : <AssetTable assets={dualInvestment} />}
+        </>
+      ) : assetsError !== null ? <InlineError message={assetsError} />
+        : view === "trading" ? <TradingBalanceTable balances={assets === null ? null : assets.tradingBalances} />
+        : view === "funding" ? <AssetTable assets={funding} />
+        : (
+          <>
+            {savingsError !== null || ordersError !== null ? <InlineError message={t("okx.partialBalances")} />
+              : assets !== null && (savings === null || orders === null) && (
+                <p className="okx-balances-pending" role="status">{t("okx.loadingEarnBalances")}</p>
+              )}
+            <AssetTable assets={combined} />
+          </>
+        )}
+    </section>
+  );
+}
+
 export function AssetTable({ assets }: { assets: OkxPortfolioAsset[] | null }) {
   const { t } = useT();
   if (assets === null) return <TableSkeleton rows={3} />;
@@ -390,28 +422,13 @@ export function AssetTable({ assets }: { assets: OkxPortfolioAsset[] | null }) {
             <td><div className="okx-account-tags">{asset.accounts.map((account) => (
               <span key={account} className={`okx-account-tag ${account}`}>{t(`okx.account.${account}`)}</span>
             ))}</div></td>
-            <td className="tnum">{formatCurrencyAmount(asset.available, asset.currency)}</td>
-            <td className="tnum">{formatCurrencyAmount(asset.frozen, asset.currency)}</td>
+            <td className="tnum">{asset.available === null ? "—" : formatCurrencyAmount(asset.available, asset.currency)}</td>
+            <td className="tnum">{asset.frozen === null ? "—" : formatCurrencyAmount(asset.frozen, asset.currency)}</td>
             <td className="tnum"><strong>{formatCurrencyAmount(asset.balance, asset.currency)}</strong>{asset.usdValue !== null && <small>${formatMoney(asset.usdValue)}</small>}</td>
           </tr>
         ))}</tbody>
       </table>
     </div>
-  );
-}
-
-function Coin({ currency }: { currency: string }) {
-  const known: Record<string, { glyph: string; className: string }> = {
-    BTC: { glyph: "₿", className: "btc" },
-    ETH: { glyph: "◆", className: "eth" },
-    USDC: { glyph: "$", className: "usdc" },
-    USDT: { glyph: "₮", className: "usdt" },
-  };
-  const appearance = known[currency];
-  return (
-    <span className={`okx-coin${appearance === undefined ? "" : ` ${appearance.className}`}`}>
-      {appearance === undefined ? currency.slice(0, 1) : appearance.glyph}
-    </span>
   );
 }
 
@@ -626,10 +643,6 @@ function OkxMark({ size }: { size: number }) {
   return <span className="okx-mark" style={{ width: size, height: size }}><Icon name="okx" size={size} sw={0} fill="currentColor" /></span>;
 }
 
-function InlineError({ message }: { message: string }) {
-  return <div className="okx-inline-error"><Icon name="alert" size={17} /><span>{message}</span></div>;
-}
-
 function DcdError({ message }: { message: string }) {
   const { t } = useT();
   const accessDisabled = message.includes("50038") || message.includes("50030");
@@ -638,14 +651,6 @@ function DcdError({ message }: { message: string }) {
 
 function PageError({ message }: { message: string }) {
   return <div className="okx-page"><div className="okx-page-error"><OkxMark size={32} /><h2>OKX</h2><p>{message}</p></div></div>;
-}
-
-function EmptyState({ title, hint }: { title: string; hint?: string }) {
-  return <div className="okx-empty"><span><Icon name="doc" size={22} /></span><strong>{title}</strong>{hint !== undefined && <p>{hint}</p>}</div>;
-}
-
-function TableSkeleton({ rows }: { rows: number }) {
-  return <div className="okx-skeleton">{Array.from({ length: rows }, (_, index) => <span key={index} />)}</div>;
 }
 
 function regionLabel(region: OkxRegion): string {

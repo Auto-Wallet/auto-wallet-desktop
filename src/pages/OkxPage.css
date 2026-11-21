@@ -371,18 +371,6 @@
   font-size: 12px;
 }
 
-.okx-count {
-  min-width: 28px;
-  height: 28px;
-  padding: 0 8px;
-  display: grid;
-  place-items: center;
-  border-radius: 9px;
-  background: var(--surface-2);
-  color: var(--ink-3);
-  font: 700 11px/1 var(--font-mono);
-}
-
 .okx-segmented {
   flex: none;
   display: flex;
@@ -407,6 +395,10 @@
   background: var(--surface);
   box-shadow: var(--sh-sm);
 }
+
+.okx-account-switcher { max-width: 100%; flex-wrap: wrap; }
+
+.okx-balances-pending { margin: 12px 24px; color: var(--ink-3); font-size: 12px; }
 
 .okx-order-head-actions {
   display: flex;
@@ -766,6 +758,7 @@
 }
 .okx-inline-error { margin: 12px 0; border-radius: 11px; }
 .okx-inline-error svg { flex: none; margin-top: 1px; }
+.okx-inline-error span { overflow-wrap: anywhere; }
 .okx-section > .okx-inline-error { margin: 20px; }
 .okx-dcd-error { margin: 20px; border-radius: 14px; color: var(--ink-2); background: var(--warn-soft); }
 .okx-dcd-error > span { flex: none; color: var(--warn); }
@@ -845,3 +838,211 @@
 .okx-csv-button:hover:not(:disabled) { color: var(--accent); }
 .okx-csv-message { flex-basis: 100%; overflow-wrap: anywhere; font-size: 12px; }
 .okx-csv-message[role="alert"] { color: var(--danger); }
+
+.okx-balance-subhead {
+  padding: 16px 24px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.okx-balance-subhead ~ .okx-balance-subhead { border-top: 1px solid var(--line); }
+
+.okx-balance-subhead h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.okx-balance-subhead p {
+  margin: 4px 0 0;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.okx-finance-table th,
+.okx-finance-table td { white-space: nowrap; }
+
+.okx-finance-table th:nth-child(2),
+.okx-finance-table td:nth-child(2) { text-align: right; }
+
+.okx-finance-table td small {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+.okx-finance-updated {
+  flex: none;
+  color: var(--ink-3);
+  font: 500 11px/1.4 var(--font-mono);
+}
+
+.okx-loans-section > .okx-empty { min-height: 92px; }
+
+.okx-loan-list {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.okx-loan-card {
+  --okx-risk-fg: var(--up);
+  --okx-risk-bg: var(--up-soft);
+  min-width: 0;
+  border: 1px solid var(--line-2);
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.okx-loan-card[data-risk="warning"] {
+  --okx-risk-fg: var(--warn);
+  --okx-risk-bg: var(--warn-soft);
+}
+
+.okx-loan-card[data-risk="liquidation"] {
+  --okx-risk-fg: var(--down);
+  --okx-risk-bg: var(--down-soft);
+}
+
+.okx-loan-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.okx-loan-head h3 {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.okx-loan-head h3 span {
+  margin-inline-start: 4px;
+  color: var(--ink);
+  font-family: var(--font-mono);
+}
+
+.okx-loan-state {
+  padding: 4px 8px;
+  border-radius: 5px;
+  color: var(--okx-risk-fg);
+  background: var(--okx-risk-bg);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.okx-loan-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+}
+
+.okx-loan-risk,
+.okx-loan-assets { padding: 16px; }
+.okx-loan-risk { border-inline-end: 1px solid var(--line); }
+
+.okx-loan-metrics,
+.okx-ltv-legend {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+}
+
+.okx-loan-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.okx-ltv-legend { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.okx-ltv-legend > div:nth-child(2) { text-align: center; }
+.okx-ltv-legend > div:nth-child(3) { text-align: end; }
+
+.okx-loan-card dt {
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.okx-loan-card dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.okx-loan-card small {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.okx-loan-card .okx-health-value {
+  color: var(--okx-risk-fg);
+  font: 700 26px/1.2 var(--font-mono);
+  letter-spacing: -0.05em;
+}
+
+.okx-ltv-chart {
+  position: relative;
+  margin: 18px 0 12px;
+}
+
+.okx-ltv-track {
+  display: grid;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 7px;
+}
+
+.okx-ltv-track i { min-width: 0; }
+.okx-ltv-track i:nth-child(1) { background: color-mix(in srgb, var(--up) 54%, var(--up-soft)); }
+.okx-ltv-track i:nth-child(2) { background: color-mix(in srgb, var(--warn) 80%, var(--warn-soft)); }
+.okx-ltv-track i:nth-child(3) { background: color-mix(in srgb, var(--down) 68%, var(--down-soft)); }
+
+.okx-ltv-marker {
+  position: absolute;
+  top: -4px;
+  width: 4px;
+  height: 15px;
+  transform: translateX(-50%);
+  border-radius: 2px;
+  background: var(--ink);
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+.okx-loan-caption {
+  margin: 10px 0 0;
+  color: var(--ink-3);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.okx-loan-assets { display: grid; align-content: start; gap: 16px; }
+.okx-loan-assets-group h4,
+.okx-loan-assets-group li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.okx-loan-assets-group h4 {
+  margin: 0 0 6px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.okx-loan-assets-group ul { display: grid; gap: 5px; margin: 0; padding: 0; }
+.okx-loan-assets-group li { font-size: 12px; }
+.okx-loan-assets-group li > :last-child { text-align: end; }
+.okx-loan-assets-group strong { color: var(--ink); }
+.okx-loan-assets-group .okx-inline-error { overflow-wrap: anywhere; }
+
+@media (max-width: 760px) {
+  .okx-loan-body { grid-template-columns: 1fr; }
+  .okx-loan-risk { border-inline-end: 0; border-bottom: 1px solid var(--line); }
+  .okx-balance-subhead { padding-inline: 16px; }
+}

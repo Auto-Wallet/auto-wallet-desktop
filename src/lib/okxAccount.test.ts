@@ -66,6 +66,7 @@ test("portfolio BTC includes principal from OKX's uppercase LIVE Dual Investment
     totalEquityUsd: "105236.00",
     updatedAt: 1786970060000,
     accountValues: { funding: "4.33", trading: "0.64", earn: "105231.02" },
+    tradingBalances: [],
     assets: [{
       account: "funding",
       currency: "BTC",
@@ -409,7 +410,12 @@ describe("OKX account response parsing", () => {
           details: [{
             ccy: "BTC",
             eq: "0.125",
+            spotBal: "0.12",
+            cashBal: "0.11",
             availEq: "0.1",
+            availBal: "0.08",
+            liab: "0.015",
+            interest: "0.000001",
             frozenBal: "0.025",
             eqUsd: "8500.50",
           }],
@@ -447,6 +453,15 @@ describe("OKX account response parsing", () => {
         usdValue: null,
       },
     ]);
+    expect(parsed.tradingBalances).toEqual([{
+      currency: "BTC",
+      spotBalance: "0.12",
+      cashBalance: "0.11",
+      available: "0.08",
+      frozen: "0.025",
+      liability: "0.015",
+      interest: "0.000001",
+    }]);
   });
 
   test("parses a live Dual Investment order and rejects missing yield", () => {

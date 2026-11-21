@@ -14,6 +14,65 @@ const store = new Map<string, string>();
 } as Storage;
 
 const { AssetTable, OrderHeadActions, OrderList, OrderYieldSummary } = await import("./OkxPage");
+const { FlexibleLoanSection, SavingsTable, TradingBalanceTable } = await import("./OkxFinance");
+
+test("shows liquidation risk, the quoted price, and available borrow rates per loan", () => {
+  const first = {
+    orderId: "123",
+    collateral: [{ currency: "BTC", amount: "0.1" }],
+    debts: [{ currency: "USDT", amount: "3000" }],
+    adjustedCollateralUsd: "5000",
+    debtUsd: "3000",
+    currentLtv: 0.6,
+    marginCallLtv: 0.7,
+    liquidationLtv: 0.8,
+    liquidation: { instrumentId: "BTC-USDT", price: "42500.375" },
+  };
+  const second = {
+    ...first,
+    orderId: "456",
+    collateral: [...first.collateral, { currency: "ETH", amount: "1" }],
+    currentLtv: 0.72,
+    liquidation: null,
+  };
+  const updatedAt = 1786977200000;
+  const loans = { updatedAt, orders: [first, second] };
+  const pending = renderToStaticMarkup(<FlexibleLoanSection loans={loans} loanRates={null} rateError={null} error={null} />);
+  expect(pending).toContain("42,500.375 USDT");
+  expect(pending).toContain('class="okx-ltv-marker" style="left:60%"');
+  expect(pending).toContain('data-risk="warning"');
+  expect(pending).toContain("1.33");
+  expect(pending).toContain("Multi-asset loan with no single liquidation price");
+
+  const actual = renderToStaticMarkup(<FlexibleLoanSection loans={loans} rateError={null} error={null} loanRates={new Map([
+    ["123", { data: new Map([["USDT", { currency: "USDT", annualRate: "0.062", interest: "0.021", appliedAt: updatedAt }]]), error: null }],
+    ["456", { data: null, error: "OKX test rate history unavailable" }],
+  ])} />);
+  expect(actual).toContain("Last borrow APY 6.2%");
+  expect(actual).toContain("Last interest 0.021");
+  expect(actual).toContain("Borrowing rate history unavailable.");
+  expect(actual).toContain("42,500.375 USDT");
+});
+
+test("renders the spot balance and Earn holdings as separate account data", () => {
+  const trading = renderToStaticMarkup(<TradingBalanceTable balances={[
+    { currency: "BTC", spotBalance: "0.125", cashBalance: "0.14", available: "0.1", frozen: "0.02", liability: "0.035", interest: "0.000001" },
+  ]} />);
+  expect(trading).toContain("Spot balance");
+  expect(trading).toContain(">0.125<");
+  expect(trading).toContain("Trading liabilities");
+  expect(trading).toContain(">0.035<");
+
+  const savings = renderToStaticMarkup(<SavingsTable error={null} savings={{
+    balances: [{ currency: "USDT", balance: "100.25", lent: "80", pending: "20.25", earnings: "0.25", minimumApr: "0.01" }],
+    rates: { data: new Map([["USDT", { currency: "USDT", annualRate: "0.028", interest: "0.004", appliedAt: 1786977200000 }]]), error: null },
+  }} />);
+  expect(savings).toContain("Last lending APR");
+  expect(savings).toContain(">2.8%<");
+  expect(savings).toContain(">1%<");
+  expect(savings).toContain(">100.25<");
+  expect(savings).toContain(">20.25<");
+});
 
 const settledOrder: OkxDcdOrder = {
   orderId: "10957529",

@@ -387,6 +387,81 @@ pub async fn okx_get_assets() -> Result<Value, String> {
     Ok(json!({ "valuation": valuation, "trading": trading, "funding": funding }))
 }
 
+fn optional_read(result: Result<Value, String>) -> Value {
+    match result {
+        Ok(data) => json!({ "data": data }),
+        Err(error) => json!({ "error": error }),
+    }
+}
+
+fn require_shell<R: tauri::Runtime>(webview: &tauri::Webview<R>) -> Result<(), String> {
+    if webview.label() != "shell" {
+        return Err("OKX finance reads are only available in the trusted shell".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn okx_get_savings<R: tauri::Runtime>(webview: tauri::Webview<R>) -> Result<Value, String> {
+    require_shell(&webview)?;
+    let creds = require_credentials()?;
+    let balances = private_get(&creds, "/api/v5/finance/savings/balance").await?;
+    let rows = balances["data"]
+        .as_array()
+        .ok_or_else(|| "OKX savings response is missing data array".to_string())?;
+    let history = if rows.is_empty() {
+        None
+    } else {
+        Some(optional_read(
+            private_get(&creds, "/api/v5/finance/savings/lending-history?limit=100").await,
+        ))
+    };
+    Ok(json!({ "balances": balances, "history": history }))
+}
+
+#[tauri::command]
+pub async fn okx_get_flexible_loans<R: tauri::Runtime>(
+    webview: tauri::Webview<R>,
+) -> Result<Value, String> {
+    require_shell(&webview)?;
+    let creds = require_credentials()?;
+    let loans = private_get(&creds, "/api/v5/finance/flexible-loan/loan-info").await?;
+    let updated_at = OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
+    Ok(json!({ "loans": loans, "updatedAt": updated_at as i64 }))
+}
+
+#[tauri::command]
+pub async fn okx_get_flexible_loan_interest<R: tauri::Runtime>(
+    webview: tauri::Webview<R>,
+    order_ids: Vec<String>,
+) -> Result<Value, String> {
+    require_shell(&webview)?;
+    if order_ids
+        .iter()
+        .any(|id| id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err("OKX flexible loan order ID must contain only digits".to_string());
+    }
+    let creds = require_credentials()?;
+    let mut seen = HashSet::new();
+    let mut interest = Vec::with_capacity(order_ids.len());
+    for order_id in order_ids {
+        if !seen.insert(order_id.clone()) {
+            continue;
+        }
+        // This endpoint permits five reads per two seconds per user.
+        if !interest.is_empty() && interest.len() % 5 == 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        let path = format!("/api/v5/finance/flexible-loan/interest-accrued?ordId={order_id}&limit=100");
+        interest.push(json!({
+            "orderId": order_id,
+            "history": optional_read(private_get(&creds, &path).await),
+        }));
+    }
+    Ok(json!(interest))
+}
+
 #[tauri::command]
 pub async fn okx_get_dcd_orders() -> Result<Value, String> {
     let creds = require_credentials()?;
